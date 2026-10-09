@@ -1,12 +1,13 @@
 // ======================================================
 // XIAO ESP32S3 SENSE (OR XIAO ML KIT): VISION CNN + LORA NETWORK
-// firmware-lora-v006  (works with index-lora-v006.html)
+// firmware-lora-v007  (works with index-lora-v006.html)
 // ======================================================
 // Small image collection, training and inference for education and proof of concept.
 //  - Images are collected per class on the SD card, a small CNN is trained on the board, then it classifies the camera.
 //  - The SD card stores the images in class folders and the weights as header/myWeights.bin and as a .h text char array.
 //  - Class labels are read from /header/config.json at boot when the number of labels equals NUM_CLASSES.
-//  - Serial Monitor and OLED output.
+//  - Serial Monitor and OLED output. The OLED is optional: it is looked for at boot (MY_OLED_ADDRESS) and, if nothing
+//    answers on D4/D5, all screen output is skipped so a board without a display runs at full speed.
 //
 // LoRa network
 //  - While inferring, every MY_DEFAULT_REPORT_SEC seconds (default 30) the board sends a short LoRa summary:
@@ -74,6 +75,7 @@
 #define MY_DEFAULT_ENCRYPT     0              // 1 = LoRa text scrambled with the seed below (hides text from casual listeners only)
 #define MY_DEFAULT_SEED        "maker100"     // encryption seed, must match on all boards
 #define MY_TOUCH_ENABLED       0              // 1 = use the A0 (D0) touch pad. Must stay 0 while LORA_DIO1 is wired to D0
+#define MY_OLED_ADDRESS        0x3C           // 7-bit I2C address of the OLED, probed at boot. Nothing answering = no display, screen output is skipped
 #define MY_DEFAULT_TOUCH_EXIT  1              // with the touch pad on: 0 = ignore it while inferring (headless units)
 #define MY_DEFAULT_PRINT_EVERY 1              // print the per-frame "Current Pred" line every N frames (1 = every frame, 10 = quieter monitor)
 // ============================================================================
@@ -100,7 +102,22 @@
 #include <RadioLib.h>        // SX1262 LoRa radio
 #include <Preferences.h>     // settings kept in flash
 
-U8G2_SSD1306_72X40_ER_1_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
+// OLED on I2C (D4 = SDA, D5 = SCL). With no display connected every page update would wait for an answer that never
+// comes (I2C timeouts, slow frames), so firstPage()/nextPage() do nothing when 'present' is false.
+class MyOled : public U8G2_SSD1306_72X40_ER_1_HW_I2C {
+ public:
+  bool present = true;
+  MyOled() : U8G2_SSD1306_72X40_ER_1_HW_I2C(U8G2_R2, U8X8_PIN_NONE) {}
+  void firstPage() { if (present) U8G2_SSD1306_72X40_ER_1_HW_I2C::firstPage(); }
+  uint8_t nextPage() { return present ? U8G2_SSD1306_72X40_ER_1_HW_I2C::nextPage() : 0; }
+};
+MyOled u8g2;
+
+bool myOledProbe() {
+  Wire.begin();                                   // default SDA/SCL pins (D4/D5)
+  Wire.beginTransmission(MY_OLED_ADDRESS);
+  return Wire.endTransmission() == 0;             // 0 = the display answered
+}
 
 // ======================================================
 // CONFIGURATION & ML HYPERPARAMETERS
@@ -1138,6 +1155,7 @@ void myLoraStatus() {
   Serial.printf("  board %s   radio %s   channel %d (%.1f MHz)   encryption %s\n", myLoraName, myLoraOk ? "ok" : "OFF (check wiring)", myLoraChannel, myLoraFreq(), myLoraEncrypt ? "on" : "off");
   Serial.printf("  LoRa packets: sent %lu, heard %lu, errors %lu     summaries sent: %lu (one every %d s)\n", myLoraTxN, myLoraRxN, myLoraErrN, myLoraSeq, myLoraReportSec);
   Serial.printf("  time now %s%s\n", st, myLoraClockBase >= 0 ? "" : "   (time since boot; @time hh:mm sets the clock)");
+  Serial.printf("  OLED %s\n", u8g2.present ? "ok" : "not found, screen output is skipped");
 }
 
 void myLoraCommand(char* l) {
@@ -1304,7 +1322,7 @@ void setup() {
   while (!Serial && millis() < 3000); 
   delay(1000);  // slow down the startup
   
-  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (firmware-lora-v006) ===");
+  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (firmware-lora-v007) ===");
   Serial.printf("Layout: INPUT_SIZE %d, CONV1_FILTERS %d, CONV2_FILTERS %d, NUM_CLASSES %d\n",
                 INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS, NUM_CLASSES);
   Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
@@ -1319,7 +1337,13 @@ if (!myRgbBuffer) {
 #if MY_TOUCH_ENABLED
   pinMode(A0, INPUT);
 #endif
-  u8g2.begin();
+  if (myOledProbe()) {
+    u8g2.begin();
+    Serial.println("OLED found");
+  } else {
+    u8g2.present = false;
+    Serial.println("OLED not found on D4/D5, screen output is skipped. The Serial Monitor and the web page still work.");
+  }
   
 // Manual SPI init with timeout to prevent hang when no SD card present
   pinMode(MY_SD_CS, OUTPUT);
