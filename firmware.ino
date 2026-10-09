@@ -1,6 +1,18 @@
 // ======================================================
 // XIAO ML KIT (OR XIAO ESP32S3 SENSE)
-// FULL VISION ML + LORA  — v47 + LoRa v002  (firmware-lora-v002)
+// FULL VISION ML + LORA  — v47 + LoRa v003  (firmware-lora-v003)
+//
+// LoRa v003 (messages, time stamps and explanations; the hardware setup is unchanged from v002):
+//  - New menu item "LoRa msg" (item 6 with 3 classes, also in the OLED menu). Inside it, whatever you type in the
+//    Serial Monitor + Enter is sent over LoRa as a chat line "<name>: <text>". Leave with /exit (or hold the touch pad).
+//  - From ANY mode (menu, inference, collection) you can send with   >your text   or   @say your text
+//  - Every LoRa line printed on the Serial Monitor now starts with a time stamp [T+hh:mm:ss] (time since boot, or the
+//    time of day after  @time hh:mm[:ss] ) and says what the packet means, for example
+//      [T+00:05:12] TX summary #5: 30 s window, 215 frames -> 0Blank 67, 1Cup 120, 2Pen 0, unsure 28  (31 bytes, ~330 ms on air)
+//      [T+00:05:14] RX from device-a02 (-62 dBm, SNR 9.5): summary #4: ... 
+//      [T+00:06:01] TX message: "device-a01: hello"  (19 bytes, ~250 ms on air)
+//    "unsure" = frames that were below the confidence limit (@conf) so no class counted them.
+//  - The "@LORA ..." and "@LORA-INFO ..." lines for the web page are unchanged, so index-lora-v001.html still works.
 //
 // LoRa v002 (hardware init taken from lora-p2p-camera-sdcard-working-v005, which runs LoRa + camera + SD together):
 //  - SX1262 RESET is no longer used (MY_LORA_RST = RADIOLIB_NC): only 8 wires are needed
@@ -18,7 +30,7 @@
 //      @LORA <rssi|self> <snr> <packet>      and the page sums them over the last x minutes (default 3).
 //  - Default name is "device-a01". Change it with  @name device-a02  (saved in flash, survives reboot).
 //  - Serial commands (end with Enter): @help @info @stats @name x @<channel> @report <sec> @conf <pct>
-//      @encrypt on|off @seed <text> @say <text>
+//      @encrypt on|off @seed <text> @say <text> @time hh:mm[:ss]   and   >text  (send a message)
 //  - Boots straight into inference when trained weights exist (MY_AUTO_START_INFER) so units run headless.
 //  - LoRa wiring: the camera uses the XIAO B2B connector (GPIO 38-40 etc.), so a Wio-SX1262 stacked on the B2B
 //    connector cannot be used together with the camera. Wire the SX1262 to the header pins below instead (v002: 8 wires).
@@ -112,7 +124,7 @@ U8G2_SSD1306_72X40_ER_1_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
 
 String myClassLabels[NUM_CLASSES] = {"0Blank", "1Cup", "2Pen"};
 
-const int myTotalItems = NUM_CLASSES + 2;      // NUM_CLASSES + 2 for menu training and inference
+const int myTotalItems = NUM_CLASSES + 3;      // NUM_CLASSES + 3: classes, Train, Infer and (v003) LoRa messages
 
 float LEARNING_RATE = 0.0003;
 int BATCH_SIZE = 6;
@@ -703,7 +715,7 @@ bool myHandleDebugChar(char c) {
     }
     return true;
   }
-  if (c == '@') { myCmdBuf[0] = '@'; myCmdLen = 1; myCmdT = millis(); return true; }
+  if (c == '@' || c == '>') { myCmdBuf[0] = c; myCmdLen = 1; myCmdT = millis(); return true; }   // v003: '>' = send a LoRa message
   if (c == 'D') {
     if (!myDebugStream) { Serial.println("Debug frames ON"); myLoraPrintInfo(); }
     myDebugStream = true;
@@ -899,13 +911,79 @@ void myLoraCount(int pred, float p) {
   if (pred >= 0 && pred < NUM_CLASSES && p * 100.0f >= myLoraMinConf) myLoraCounts[pred]++;
 }
 
-void myLoraTransmit(char* pkt) {
-  if (!myLoraOk || myLoraTxBusy) return;
+// ---- v003: time stamps, readable packet descriptions, last messages for the OLED ----
+long myLoraClockBase = -1;            // -1 = no clock set: stamps show time since boot; else seconds-of-day minus uptime
+char myLoraLastTx[40] = "", myLoraLastRx[40] = "";   // "<stamp> <text>" of the last message, for the OLED
+
+void myLoraStamp(char* out, size_t n) {
+  unsigned long s = millis() / 1000UL;
+  if (myLoraClockBase >= 0) {
+    s = (s + (unsigned long)myLoraClockBase) % 86400UL;
+    snprintf(out, n, "%02lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
+  } else {
+    snprintf(out, n, "T+%02lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
+  }
+}
+
+// Turns a summary packet  S,<name>,<seq>,<period>,<frames>,<c0>,<c1>,...  into words, e.g.
+//   summary #5: 30 s window, 215 frames -> 0Blank 67, 1Cup 120, 2Pen 0, unsure 28
+// The sender name goes into 'name'. Returns false when the packet is not a summary.
+bool myLoraExplain(const char* pkt, char* name, size_t nn, char* out, size_t n) {
+  if (pkt[0] != 'S' || pkt[1] != ',') return false;
+  char tmp[MY_LORA_MAX + 40];
+  strncpy(tmp, pkt, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
+  char* sp;
+  strtok_r(tmp, ",", &sp);                              // "S"
+  char* nm  = strtok_r(NULL, ",", &sp);
+  char* seq = strtok_r(NULL, ",", &sp);
+  char* per = strtok_r(NULL, ",", &sp);
+  char* frm = strtok_r(NULL, ",", &sp);
+  if (!nm || !seq || !per || !frm) return false;
+  strncpy(name, nm, nn - 1); name[nn - 1] = 0;
+  long frames = atol(frm), sum = 0;
+  int len = snprintf(out, n, "summary #%s: %s s window, %s frames ->", seq, per, frm);
+  int i = 0;
+  for (char* c = strtok_r(NULL, ",", &sp); c && len < (int)n - 24; c = strtok_r(NULL, ",", &sp), i++) {
+    long v = atol(c);
+    sum += v;
+    if (i < NUM_CLASSES) len += snprintf(out + len, n - len, "%s %s %ld", i ? "," : "", myClassLabels[i].c_str(), v);
+    else                 len += snprintf(out + len, n - len, "%s class%d %ld", i ? "," : "", i, v);
+  }
+  if (frames > sum && len < (int)n - 24) snprintf(out + len, n - len, ", unsure %ld", frames - sum);
+  return true;
+}
+
+// Sends one packet and prints what was sent and when. Returns true when the radio accepted it.
+bool myLoraTransmit(char* pkt) {
+  char st[16]; myLoraStamp(st, sizeof(st));
+  int len = strlen(pkt);
+  if (!myLoraOk)    { Serial.printf("[%s] NOT SENT, the LoRa radio is off (check wiring): %s\n", st, pkt); return false; }
+  if (myLoraTxBusy) { Serial.printf("[%s] NOT SENT, the radio is still busy, try again: %s\n", st, pkt); return false; }
+  unsigned long air = (unsigned long)(myRadio.getTimeOnAir(len) / 1000);
+  char nm[24], ex[200];
+  const char* enc = myLoraEncrypt ? ", encrypted" : "";
+  if (myLoraExplain(pkt, nm, sizeof(nm), ex, sizeof(ex)))
+    Serial.printf("[%s] TX %s  (%d bytes, ~%lu ms on air%s)\n", st, ex, len, air, enc);
+  else
+    Serial.printf("[%s] TX message: \"%s\"  (%d bytes, ~%lu ms on air%s)\n", st, pkt, len, air, enc);
+  snprintf(myLoraLastTx, sizeof(myLoraLastTx), "%s %s", st, pkt);
   if (myLoraEncrypt) myLoraCipher(pkt, true);
   digitalWrite(MY_SD_CS, HIGH);   // v002: SD card deselected before LoRa SPI activity
   myRadio.standby();
-  if (myRadio.startTransmit(pkt) == RADIOLIB_ERR_NONE) { myLoraTxBusy = true; myLoraTxStart = millis(); myLoraTxN++; }
-  else { myLoraErrN++; myRadio.startReceive(); }
+  if (myRadio.startTransmit(pkt) == RADIOLIB_ERR_NONE) { myLoraTxBusy = true; myLoraTxStart = millis(); myLoraTxN++; return true; }
+  myLoraErrN++; myRadio.startReceive();
+  Serial.printf("[%s] TX FAILED, the radio did not start sending\n", st);
+  return false;
+}
+
+// Chat line: "<name>: <text>"
+bool myLoraSendText(const char* text) {
+  while (*text == ' ') text++;
+  if (!*text) { Serial.println(F("[E] nothing to send. Type some text after the command")); return false; }
+  char pkt[MY_LORA_MAX + 1];
+  int need = snprintf(pkt, sizeof(pkt), "%s: %s", myLoraName, text);
+  if (need >= (int)sizeof(pkt)) Serial.printf("[note] message cut to %d characters (the limit includes \"%s: \")\n", (int)sizeof(pkt) - 1, myLoraName);
+  return myLoraTransmit(pkt);
 }
 
 void myLoraReport() {
@@ -917,7 +995,7 @@ void myLoraReport() {
   int n = snprintf(pkt, sizeof(pkt), "S,%s,%lu,%lu,%lu", myLoraName, myLoraSeq, period, (unsigned long)myLoraFrames);
   for (int i = 0; i < NUM_CLASSES && n < (int)sizeof(pkt) - 8; i++) n += snprintf(pkt + n, sizeof(pkt) - n, ",%u", myLoraCounts[i]);
   Serial.printf("@LORA self 0 %s\n", pkt);
-  myLoraTransmit(pkt);
+  if (myLoraOk) myLoraTransmit(pkt);   // v003: prints a time-stamped explanation of what was sent
   myLoraSeq++;
   memset(myLoraCounts, 0, sizeof(myLoraCounts));
   myLoraFrames = 0;
@@ -939,8 +1017,16 @@ void myLoraService() {
         char b[MY_LORA_MAX + 40];
         s.toCharArray(b, sizeof(b));
         if (myLoraEncrypt) myLoraCipher(b, false);
-        if (b[0] == 'S' && b[1] == ',') Serial.printf("@LORA %d %.1f %s\n", (int)myRadio.getRSSI(), myRadio.getSNR(), b);
-        else Serial.printf("[RX %d dBm] %s\n", (int)myRadio.getRSSI(), b);
+        int rssi = (int)myRadio.getRSSI(); float snr = myRadio.getSNR();
+        char stp[16], nm[24], ex[200];
+        myLoraStamp(stp, sizeof(stp));
+        if (b[0] == 'S' && b[1] == ',') {
+          Serial.printf("@LORA %d %.1f %s\n", rssi, snr, b);   // machine line for the web page (unchanged)
+          if (myLoraExplain(b, nm, sizeof(nm), ex, sizeof(ex))) Serial.printf("[%s] RX from %s (%d dBm, SNR %.1f): %s\n", stp, nm, rssi, snr, ex);
+        } else {
+          Serial.printf("[%s] RX message (%d dBm, SNR %.1f): %s\n", stp, rssi, snr, b);
+          snprintf(myLoraLastRx, sizeof(myLoraLastRx), "%s %s", stp, b);
+        }
       } else if (st != RADIOLIB_ERR_RX_TIMEOUT) {
         myLoraErrN++;
         Serial.printf("[E] LoRa read error %d\n", st);
@@ -959,8 +1045,11 @@ void myLoraHelp() {
   Serial.println(F("  @<num>        radio channel, 915.0 MHz + num*0.1 (all devices must match)"));
   Serial.println(F("  @report <s>   seconds between summaries (5..3600, default 30)"));
   Serial.println(F("  @conf <pct>   minimum confidence to count a frame (0..100, default 60)"));
-  Serial.println(F("  @encrypt on|off   @seed <text>   @say <text> (broadcast a chat line)"));
+  Serial.println(F("  @encrypt on|off   @seed <text>"));
+  Serial.println(F("  >text  or  @say text   send a chat message over LoRa (works in every mode)"));
+  Serial.println(F("  @time hh:mm[:ss]   set the clock used in the [time] stamps (lost at reboot; default is time since boot)"));
   Serial.println(F("  @info   @stats   @help"));
+  Serial.println(F("  Menu item \"LoRa msg\": everything you type + Enter is sent as a message, /exit leaves"));
 }
 
 void myLoraCommand(char* l) {
@@ -1002,12 +1091,16 @@ void myLoraCommand(char* l) {
     myLoraEncrypt = (l[10] == 'n' || l[10] == 'N'); myLoraSave();
     Serial.println(myLoraEncrypt ? F("[OK] encryption ON (saved)") : F("[OK] encryption OFF (saved)")); return;
   }
-  if (!strncasecmp(l, "@say ", 5)) {
-    char pkt[MY_LORA_MAX + 32];
-    snprintf(pkt, sizeof(pkt), "%s: %s", myLoraName, l + 5);
-    if (myLoraTxBusy || !myLoraOk) { Serial.println(F("[E] radio busy or off")); return; }
-    Serial.printf("[TX] %s\n", pkt);
-    myLoraTransmit(pkt); return;
+  if (l[0] == '>') { myLoraSendText(l + 1); return; }                        // v003:  >hello
+  if (!strncasecmp(l, "@say ", 5)) { myLoraSendText(l + 5); return; }
+  if (!strncasecmp(l, "@time", 5)) {
+    int h, m, sec = 0;
+    if (l[5] == 0) { char st[16]; myLoraStamp(st, sizeof(st)); Serial.printf("[%s] now\n", st); return; }
+    int got = sscanf(l + 5, "%d:%d:%d", &h, &m, &sec);
+    if (got < 2 || h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) { Serial.println(F("[E] use  @time hh:mm  or  @time hh:mm:ss  (24 hour clock)")); return; }
+    long tod = h * 3600L + m * 60L + sec;
+    myLoraClockBase = (tod + 86400L - (long)((millis() / 1000UL) % 86400UL)) % 86400L;
+    Serial.println(F("[OK] clock set, [time] stamps now show the time of day (not saved, lost at reboot)")); return;
   }
   char* e;
   long ch = strtol(l + 1, &e, 10);
@@ -1088,6 +1181,7 @@ bool myLoadImageFromFile(const char* path, float* buf) {
 void myActionCollect(int classIdx);
 void myActionTrain();
 void myActionInfer();
+void myActionLoraChat();   // v003
 void myResetMenuState();
 void myHandleMenuNavigation();
 void myDrawMenu();
@@ -1097,7 +1191,7 @@ void setup() {
   while (!Serial && millis() < 3000); 
   delay(1000);  // slow down the startup
   
-  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (v47 + LoRa v002) ===");
+  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (v47 + LoRa v003) ===");
   Serial.printf("Layout: INPUT_SIZE %d, CONV1_FILTERS %d, CONV2_FILTERS %d, NUM_CLASSES %d\n",
                 INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS, NUM_CLASSES);
   Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
@@ -2159,6 +2253,65 @@ void myActionInfer() {
 // ██████████████████████████████████████████████████████████████████████████████
 
 
+// v003: LoRa messages screen. Whatever is typed in the Serial Monitor (+ Enter) is sent over LoRa.
+void myLoraDrawChat() {
+  char b[20];
+  u8g2.firstPage();
+  do {
+    u8g2.setFont(u8g2_font_5x7_tf);
+    snprintf(b, sizeof(b), "LoRa ch%d T%lu R%lu", myLoraChannel, myLoraTxN, myLoraRxN);
+    u8g2.drawStr(0, 7, b);
+    for (int k = 0; k < 2; k++) {
+      const char* m = k == 0 ? myLoraLastTx : myLoraLastRx;
+      const char* tag = k == 0 ? "TX " : "RX ";
+      char l1[20] = "", l2[20] = "";
+      if (m[0]) {
+        const char* sp = strchr(m, ' ');
+        snprintf(l1, sizeof(l1), "%s%.*s", tag, sp ? (int)(sp - m) : 10, m);
+        if (sp) snprintf(l2, sizeof(l2), "%.14s", sp + 1);
+      } else snprintf(l1, sizeof(l1), "%s-", tag);
+      u8g2.drawStr(0, 15 + k * 16, l1);
+      u8g2.drawStr(0, 23 + k * 16, l2);
+    }
+  } while (u8g2.nextPage());
+}
+
+void myActionLoraChat() {
+  Serial.println(F("\n=== LORA MESSAGES ==="));
+  Serial.printf("name %s, channel %d (%.1f MHz), radio %s\n", myLoraName, myLoraChannel, myLoraFreq(), myLoraOk ? "ok" : "OFF");
+  Serial.println(F("Type text + Enter to send it. /exit (or hold the touch pad) leaves. @help lists the other commands."));
+  myResetTouchState();
+  char line[MY_LORA_MAX + 1];
+  int n = 0;
+  myLoraDrawChat();
+  unsigned long lastDraw = millis();
+  while (true) {
+    myLoraService();
+    while (Serial.available()) {
+      char c = Serial.read();
+      if (c == '\r' || c == '\n') {
+        line[n] = 0; n = 0;
+        if (!line[0]) continue;
+        if (!strcasecmp(line, "/exit") || !strcasecmp(line, "/x")) { Serial.println(F("Leaving LoRa messages")); myResetMenuState(); return; }
+        if (line[0] == '@') myLoraCommand(line);
+        else if (line[0] == '/') Serial.println(F("[E] unknown /command. Only /exit exists; everything else you type is sent"));
+        else myLoraSendText(line);
+        myLoraDrawChat(); lastDraw = millis();
+      } else if (n < (int)sizeof(line) - 1) line[n++] = c;
+    }
+    if (myCheckTouchInput() == 2) { Serial.println(F("Leaving LoRa messages")); myResetMenuState(); return; }
+    if (millis() - lastDraw > 1000) { myLoraDrawChat(); lastDraw = millis(); }
+    delay(5);
+  }
+}
+
+String myMenuLabel(int i) {
+  if (i <= NUM_CLASSES)     return myClassLabels[i - 1];
+  if (i == NUM_CLASSES + 1) return "Train";
+  if (i == NUM_CLASSES + 2) return "Infer";
+  return "LoRa msg";
+}
+
 void myResetMenuState() {
   myIsSelected = false;
   myResetTouchState();  // Use unified touch reset
@@ -2170,16 +2323,14 @@ void myDrawMenu() {
   // ===== SERIAL MENU =====
   Serial.println("\n=== MENU ===");
   for (int i = 1; i <= myTotalItems; i++) {
-    String label =
-      (i <= NUM_CLASSES) ? myClassLabels[i - 1] :
-      (i == NUM_CLASSES + 1) ? "Train" : "Infer";
+    String label = myMenuLabel(i);
 
     if (i == myMenuIndex) Serial.print(" > ");
     else                 Serial.print("   ");
 
     Serial.printf("%d. %s\n", i, label.c_str());
   }
-  Serial.println("Commands: t=next (tap)  l=select (longpress)");
+  Serial.println("Commands: t=next (tap)  l=select (longpress)   >text = send a LoRa message");
 
   // ===== OLED MENU =====
   u8g2.firstPage();
@@ -2193,9 +2344,7 @@ void myDrawMenu() {
       int cur = myStartItem + i;
       if (cur > myTotalItems) break;
 
-      String label =
-        (cur <= NUM_CLASSES) ? myClassLabels[cur - 1] :
-        (cur == NUM_CLASSES + 1) ? "Train" : "Infer";
+      String label = myMenuLabel(cur);
 
       int y = 18 + i * 9;
       if (cur == myMenuIndex)
@@ -2210,7 +2359,8 @@ void myDrawMenu() {
 void myExecuteMenuItem(int idx) {
   if (idx <= NUM_CLASSES)        myActionCollect(idx - 1);
   else if (idx == NUM_CLASSES+1) myActionTrain();
-  else                           myActionInfer();
+  else if (idx == NUM_CLASSES+2) myActionInfer();
+  else                           myActionLoraChat();
 }
 
 void myHandleMenuNavigation() {
