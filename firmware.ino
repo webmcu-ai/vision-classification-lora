@@ -1,2427 +1,1688 @@
-// ======================================================
-// XIAO ML KIT (OR XIAO ESP32S3 SENSE)
-// FULL VISION ML + LORA  — v47 + LoRa v003  (firmware-lora-v003)
-//
-// LoRa v003 (messages, time stamps and explanations; the hardware setup is unchanged from v002):
-//  - New menu item "LoRa msg" (item 6 with 3 classes, also in the OLED menu). Inside it, whatever you type in the
-//    Serial Monitor + Enter is sent over LoRa as a chat line "<name>: <text>". Leave with /exit (or hold the touch pad).
-//  - From ANY mode (menu, inference, collection) you can send with   >your text   or   @say your text
-//  - Every LoRa line printed on the Serial Monitor now starts with a time stamp [T+hh:mm:ss] (time since boot, or the
-//    time of day after  @time hh:mm[:ss] ) and says what the packet means, for example
-//      [T+00:05:12] TX summary #5: 30 s window, 215 frames -> 0Blank 67, 1Cup 120, 2Pen 0, unsure 28  (31 bytes, ~330 ms on air)
-//      [T+00:05:14] RX from device-a02 (-62 dBm, SNR 9.5): summary #4: ... 
-//      [T+00:06:01] TX message: "device-a01: hello"  (19 bytes, ~250 ms on air)
-//    "unsure" = frames that were below the confidence limit (@conf) so no class counted them.
-//  - The "@LORA ..." and "@LORA-INFO ..." lines for the web page are unchanged, so index-lora-v001.html still works.
-//
-// LoRa v002 (hardware init taken from lora-p2p-camera-sdcard-working-v005, which runs LoRa + camera + SD together):
-//  - SX1262 RESET is no longer used (MY_LORA_RST = RADIOLIB_NC): only 8 wires are needed
-//      3V3, GND, SCK->D8, MISO->D9, MOSI->D10, NSS->D1, BUSY->D3, DIO1->D6
-//  - The shared SPI bus is started with explicit pins and no hardware SS (SPI.begin(D8, D9, D10, -1)), so GPIO2
-//    (the LoRa NSS pin, which is also the board's default SS) is never touched by the SPI peripheral.
-//  - SPI is started again right before the radio starts (after the SD card and camera have been initialised)
-//  - SD chip select (GPIO21) and LoRa NSS are both driven HIGH first, and the SD card is deselected before every LoRa transmit
-//  - Nothing changed in the page protocol (@LORA, @LORA-INFO), so index-lora-v001.html still works unchanged
-//
-// LoRa v001 (on top of firmware-v005):
-//  - Every device classifies with its own CNN and every MY_REPORT seconds (default 30) sends a short LoRa summary:
-//      S,<name>,<seq>,<periodSec>,<frames>,<c0>,<c1>,...     (count of frames per class, confidence >= @conf)
-//  - The device that is connected to the web page by Web Serial prints every summary it hears (and its own) as
-//      @LORA <rssi|self> <snr> <packet>      and the page sums them over the last x minutes (default 3).
-//  - Default name is "device-a01". Change it with  @name device-a02  (saved in flash, survives reboot).
-//  - Serial commands (end with Enter): @help @info @stats @name x @<channel> @report <sec> @conf <pct>
-//      @encrypt on|off @seed <text> @say <text> @time hh:mm[:ss]   and   >text  (send a message)
-//  - Boots straight into inference when trained weights exist (MY_AUTO_START_INFER) so units run headless.
-//  - LoRa wiring: the camera uses the XIAO B2B connector (GPIO 38-40 etc.), so a Wio-SX1262 stacked on the B2B
-//    connector cannot be used together with the camera. Wire the SX1262 to the header pins below instead (v002: 8 wires).
-//
-//
-// Small Image collection, training, inference for education and proof of concept
-//
-// SD card stores: images in class folders
-// SD card stores: headers in bin and .h text char array format
-// Serial monitor and OLED output
-// By Jeremy Ellis
-// With free tier assistance from: Claude (code overview), ChatGPT (Critique), Gemini (Research) and Copilot (Alternate)
-// Use at your own risk!
-// MIT license
-//
-// Github Profile https://github.com/hpssjellis
-// LinkedIn https://www.linkedin.com/in/jeremy-ellis-4237a9bb/
-//
-// v47 changes (firmware-v005):
-//  - Optional Web Serial debug frames for the web trainer page. Nothing extra is printed unless the page
-//    sends 'D' (it repeats it every 5 s; the device stops after 15 s of silence, or on 'd').
-//    While on, the device prints one "@F ..." line: the camera JPEG (base64) every 10th inference with the
-//    class probabilities, logits, centre input pixel and a heatmap, plus each saved image and a slow live
-//    preview (about 1 per second) while collecting. The page shows it and compares with its own model.
-//
-// v46 changes (firmware-v003):
-//  - Class labels are now read from /header/config.json at boot (written by the web trainer page).
-//    The number of labels in the file must equal NUM_CLASSES; if not, the compiled labels are kept and a
-//    message is printed. NUM_CLASSES, INPUT_SIZE and the filter counts are still compile-time, so adding or
-//    removing a class means changing NUM_CLASSES and reflashing. INPUT_SIZE / filter counts in config.json
-//    are only compared with the sketch and a WARNING is printed on mismatch.
-//
-// v45 changes (firmware-v002):
-//  - Camera is now flipped vertically as well as mirrored, to match the images from the web trainer page
-//  - Camera brightness / AE level raised (MY_CAM_* settings below) and a few warm-up frames are discarded
-//  - Hard-coded "36" in conv2 removed, so CONV1_FILTERS, CONV2_FILTERS and INPUT_SIZE can really be changed
-//  - myLoadWeights() refuses a myWeights.bin whose size does not match this sketch's layout
-//  - myWeights.h header comment lists INPUT_SIZE and filter counts as well as the classes
-//  NOTE: images saved with v44 are upside down compared with v45. Recapture them, or flip them, before training.
-//
-// For platformio you need the U8g2 library declared in the platformio.ini file and OPI PSRAM set
-// lib_deps =  olikraus/U8g2 @ ^2.35.30
-// ; Overriding defaults to enable OPI PSRAM
-// build_flags = 
-//    -DBOARD_HAS_PSRAM
-//    -DARDUINO_USB_CDC_ON_BOOT=1
-// board_build.arduino.memory_type = qio_opi
-// board_build.flash_mode = qio
-// board_upload.flash_size = 8MB
-//
+<!DOCTYPE html>
+<!--
+  webMCU-AI  |  Vision CNN SD trainer + LoRa network  |  v004
+  Companion page for the XIAO ESP32-S3 "FULL VISION ML v44" firmware.
+  Reads images/<class>/*.jpg from the SD card, trains the same CNN (input size and filters selectable) in plain JS,
+  analyzes the dataset, and writes header/myWeights.bin back for the device to load.
+  No external libraries. No network. MIT license. Use at your own risk.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vision CNN + LoRa network v004</title>
+<style>
+:root{--bg:#11151b;--panel:#182029;--panel2:#1f2a36;--line:#2c3947;--text:#dde5ee;--mut:#8b9aac;--acc:#66d1bd;--acc-ink:#062a24;--bad:#ef6b73;--warn:#e9b44c;--ok:#7bd88f;--r:8px}
+*{box-sizing:border-box}
+html{color-scheme:dark}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif}
+header,main{max-width:1100px;margin:0 auto;padding:0 20px}
+header{padding-top:28px;padding-bottom:4px}
+h1{font-size:26px;margin:0 0 6px;font-weight:650;letter-spacing:-.01em}
+.ver{font-size:14px;color:var(--mut);font-weight:400;margin-left:8px}
+header p{margin:2px 0;color:var(--mut);max-width:72ch}
+section{margin:22px 0;padding:18px 20px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:var(--r)}
+h2{margin:0 0 12px;font-size:18px;font-weight:600}
+h3{margin:18px 0 8px;font-size:15px;font-weight:600}
+p{margin:6px 0}
+button,select,input,textarea{font:inherit;color:var(--text)}
+button{min-height:42px;padding:8px 16px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--acc)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--acc);color:var(--acc-ink);border-color:var(--acc);font-weight:600}
+button.danger{border-color:var(--bad);color:var(--bad)}
+input[type=number],input[type=text],select{min-height:40px;padding:6px 10px;background:#0f1319;border:1px solid var(--line);border-radius:6px;width:100%}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+label{display:block;font-size:13px;color:var(--mut)}
+label.chk{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--text);min-height:40px}
+input[type=checkbox]{width:18px;height:18px;accent-color:var(--acc)}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0}
+.row>select,.row>input[type=text]{width:auto;min-width:160px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.note{color:var(--mut);font-size:13px}
+.info{background:#0f1319;border:1px solid var(--line);border-radius:6px;padding:10px 14px;font-size:14px}
+.info div{margin:2px 0}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--mut);font-weight:500}
+.tblwrap{overflow-x:auto}
+.cm td,.cm th{text-align:center;min-width:56px}
+.cm td.diag{outline:2px solid var(--acc);outline-offset:-2px;font-weight:700}
+pre{margin:8px 0;padding:10px 14px;background:#0f1319;border:1px solid var(--line);border-radius:6px;overflow-x:auto;font:13px/1.5 ui-monospace,Consolas,monospace}
+details{margin:6px 0;border:1px solid var(--line);border-radius:6px;background:#0f1319}
+summary{cursor:pointer;padding:8px 12px;min-height:40px;display:flex;align-items:center}
+.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:6px;padding:8px 12px 12px}
+.thumbs img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid var(--line);background:#000}
+.wrong{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px}
+.wrong figure{margin:0;cursor:pointer;font-size:12px}
+.wrong img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;border:1px solid var(--bad)}
+.wrong figcaption{color:var(--mut);margin-top:2px}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-top:12px}
+canvas.chart{width:100%;height:auto;border:1px solid var(--line);border-radius:6px}
+.bar{height:14px;background:#0f1319;border-radius:4px;overflow:hidden;border:1px solid var(--line)}
+.bar i{display:block;height:100%;background:var(--acc)}
+.prob{display:grid;grid-template-columns:110px 1fr 52px;gap:8px;align-items:center;font-size:13px;margin:3px 0}
+.prob span:last-child{text-align:right;color:var(--mut)}
+.cam{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start}
+.cam video,.cam canvas{width:288px;height:288px;background:#000;border-radius:6px;border:1px solid var(--line);object-fit:cover}
+video.mir{transform:scaleX(-1)}
+.banner{font-size:28px;font-weight:650;margin:6px 0}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:var(--r);padding:16px;max-width:min(860px,96vw)}
+dialog::backdrop{background:rgba(0,0,0,.65)}
+.inspBody{display:flex;flex-wrap:wrap;gap:16px}
+.inspBody canvas{width:min(400px,86vw);height:auto;aspect-ratio:1;border-radius:6px;border:1px solid var(--line);background:#000}
+.inspSide{flex:1;min-width:250px}
+textarea.mono,textarea#console{width:100%;height:220px;background:#0b0e13;border:1px solid var(--line);border-radius:6px;padding:10px;font:12.5px/1.45 ui-monospace,Consolas,monospace;resize:vertical}
+.vwrap{position:relative;width:288px;height:288px}
+.vwrap video{width:100%;height:100%}
+.vwrap.flash video{outline:4px solid var(--bad);outline-offset:-4px}
+.rec{display:none;position:absolute;top:10px;right:10px;background:var(--bad);color:#fff;font-weight:700;font-size:13px;padding:2px 10px;border-radius:12px}
+.rec.on{display:block}
+button.burst{background:#2a1a1d;border-color:var(--bad);color:#ffb3b8}
+button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);font-weight:700}
+.revframe{position:relative;width:min(400px,86vw);aspect-ratio:1;border:3px solid var(--line);border-radius:6px;overflow:hidden;background:#000}
+.revframe img{width:100%;height:100%;object-fit:cover;display:block}
+.revframe.marked{border-color:var(--bad)}
+.revtag{display:none;position:absolute;top:8px;left:8px;background:var(--bad);color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;font-size:13px}
+.revframe.marked .revtag{display:block}
+
+.lorabanner{border:1px solid var(--ok);border-radius:var(--r);padding:12px 16px;margin:10px 0;background:#0f1319}
+.lorabanner.alert{border-color:var(--bad);background:#2a1a1d}
+.lorabanner.wait{border-color:var(--line)}
+.lorabanner .big{font-size:26px;font-weight:650}
+.chip{display:inline-block;padding:1px 9px;margin:2px 4px 2px 0;border-radius:11px;background:var(--panel2);border:1px solid var(--line);font-size:12.5px}
+.chip.hot{border-color:var(--bad);color:#ffb3b8}
+#loraLog{max-height:260px;overflow:auto;font:13px/1.55 ui-monospace,Consolas,monospace;background:#0f1319;border:1px solid var(--line);border-radius:6px;padding:8px 12px}
+#loraLog .hot{color:#ffb3b8}
+#loraLog .msg{color:var(--acc)}
+#loraLog .who{font-weight:650}
+.row.cmd input{width:150px;min-width:0}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Vision CNN SD trainer<span class="ver">LoRa v004</span></h1>
+  <p>Browser companion for the XIAO ESP32-S3 FULL VISION ML firmware (v44, or firmware-v005 for config.json class names and debug frames): load the SD card, add images, review and clean them, train the same CNN, then write myWeights.bin back to the card.</p>
+  <p>Everything runs in this page. Images and weights never leave your computer.</p>
+  <p><b>LoRa network:</b> connect one device in section 8 and section 9 sums what every nearby LoRa device has seen. <a href="#s-lora" style="color:var(--acc)">Jump to LoRa network</a></p>
+</header>
+<main>
+
+<!-- ============ 1 DATA SOURCE ============ -->
+<section id="s-source">
+  <h2>1 Data source</h2>
+  <div class="row">
+    <button id="btnDir" class="primary">Pick SD card folder</button>
+    <button id="btnZip">Load .zip</button>
+    <input type="file" id="zipFile" accept=".zip,application/zip" hidden>
+  </div>
+  <p class="note" id="dirNote"></p>
+  <div class="info" id="sourceInfo">Nothing loaded yet. Pick the root of the SD card (the folder that contains <b>images</b> and <b>header</b>).</div>
+</section>
+
+<!-- ============ 2 CLASSES AND DATA ============ -->
+<section id="s-data">
+  <h2>2 Classes and data</h2>
+  <div class="tblwrap"><table id="classTable"><thead><tr><th>Class folder</th><th>Images</th><th>Train / validation</th><th></th></tr></thead><tbody></tbody></table></div>
+  <div class="row">
+    <input type="text" id="newClass" placeholder="New class, e.g. 3Book" aria-label="New class name">
+    <button id="btnAddClass">Add class</button>
+  </div>
+  <p class="note">The sketch must be compiled with these values (firmware-v002 and later refuse a weights file of the wrong size). firmware-v003 also reads the class names from header/config.json at boot, but their count must equal NUM_CLASSES, so adding or removing a class means editing NUM_CLASSES and reflashing:</p>
+  <pre id="fwLines">(no classes yet)</pre>
+
+  <h3>Add images from the webcam</h3>
+  <div class="cam">
+    <div class="vwrap" id="capWrap"><video id="capVideo" class="mir" playsinline muted></video><span id="rec" class="rec">● REC</span></div>
+    <div style="flex:1;min-width:230px">
+      <div class="row"><button id="btnCam">Start camera</button></div>
+      <div class="row">
+        <select id="capClass" aria-label="Class to capture into"></select>
+        <button id="btnCapture" class="primary">Capture (Space)</button>
+        <button id="btnBurst" class="burst">Burst 10 (B)</button>
+        <label class="chk" style="gap:6px">Delay <input type="number" id="burstMs" value="0" min="0" max="2000" step="10" style="width:84px" aria-label="Burst delay in milliseconds"> ms</label>
+      </div>
+      <label class="chk"><input type="checkbox" id="mirror" checked> Mirror frames horizontally like the device (hmirror on). firmware-v002 and later also flip vertically, so device and page images match.</label>
+      <p class="note" id="capNote">Frames are center-cropped to a square, resized to 240x240 and saved as JPEG straight into images/&lt;class&gt;/ (SD folder) or the zip. Burst takes 10 fresh camera frames back to back, plus the delay you set between them, while the button is red, then saves them. Burst frames are near-duplicates, so move or tilt the object between bursts.</p>
+    </div>
+  </div>
+
+  <h3>Sample browser</h3>
+  <div class="row"><button id="btnReview" class="primary">Review images</button></div>
+  <p class="note">Review steps through one class at a time: mark bad images, then delete them all with one confirmation. Or open a class below and click an image to see its heatmap, delete it, or move it.</p>
+  <div id="browser"></div>
+</section>
+
+<!-- ============ 3 TRAIN ============ -->
+<section id="s-train">
+  <h2>3 Train</h2>
+  <h3 style="margin-top:0">Model layout</h3>
+  <div class="grid">
+    <label>Input size (square, even)
+      <select id="inSize"><option value="24">24 x 24</option><option value="32">32 x 32</option><option value="40">40 x 40</option><option value="48">48 x 48</option><option value="64">64 x 64</option><option value="80">80 x 80</option><option value="96">96 x 96</option><option value="128">128 x 128</option></select>
+    </label>
+    <label>Conv1 filters (1-16)<input type="number" id="c1f" value="4" step="1" min="1" max="16"></label>
+    <label>Conv2 filters (1-32)<input type="number" id="c2f" value="8" step="1" min="1" max="32"></label>
+  </div>
+  <p class="note">These are compile-time settings in the sketch (INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS). Copy the lines from section 2 into the sketch after changing them. The 3x3 kernel is fixed in the firmware loops. Images on the card stay 240x240, so changing the size needs no new photos, only a retrain. Cost grows with the square of the input size. Changing the layout discards the model in memory.</p>
+  <h3>Training settings</h3>
+  <div class="grid">
+    <label>Learning rate<input type="number" id="lr" value="0.0003" step="0.0001" min="0.000001"></label>
+    <label>Batch size<input type="number" id="batch" value="6" step="1" min="1"></label>
+    <label>Epochs<input type="number" id="epochs" value="20" step="1" min="1"></label>
+    <label>Validation rule
+      <select id="valMode">
+        <option value="fw">Last N images per class (firmware rule)</option>
+        <option value="pct">Percent of smallest class</option>
+      </select>
+    </label>
+    <label><span id="valAmtLabel">Images per class held out</span><input type="number" id="valAmt" value="3" step="1" min="0"></label>
+    <label>Dropout (browser only)<input type="number" id="dropout" value="0" step="0.05" min="0" max="0.8"></label>
+  </div>
+  <div class="row">
+    <label class="chk"><input type="checkbox" id="augment"> Augmentation: flip and brightness (browser only)</label>
+    <label class="chk"><input type="checkbox" id="cont" checked> Continue from the weights in memory</label>
+  </div>
+  <p class="note" id="splitInfo"></p>
+  <div class="row">
+    <button id="btnTrain" class="primary">Train</button>
+    <button id="btnPause" disabled>Pause</button>
+    <button id="btnStop" class="danger" disabled>STOP</button>
+  </div>
+  <div class="info" id="trainStatus">Idle.</div>
+  <div class="charts">
+    <canvas id="chLoss" class="chart" width="520" height="220"></canvas>
+    <canvas id="chAcc" class="chart" width="520" height="220"></canvas>
+  </div>
+  <p class="note">Training never saves by itself. Save the model in section 6 when you are happy with it.</p>
+</section>
+
+<!-- ============ 4 ANALYZE ============ -->
+<section id="s-analyze">
+  <h2>4 Analyze</h2>
+  <div class="row">
+    <select id="evalSet" aria-label="Evaluate on">
+      <option value="val">Evaluate on validation images</option>
+      <option value="all">Evaluate on all images (find bad labels)</option>
+    </select>
+    <button id="btnEval" class="primary">Update evaluation</button>
+    <button id="btnParity">Parity self-test</button>
+  </div>
+  <div class="info" id="modelInfo"></div>
+
+  <h3>Confusion matrix</h3>
+  <p class="note" id="evalNote">No evaluation yet. It runs automatically when training ends.</p>
+  <div class="tblwrap" id="cmWrap"></div>
+
+  <h3>Per-class precision and recall</h3>
+  <div class="tblwrap" id="pcWrap"></div>
+  <div id="pcWarn"></div>
+
+  <h3>Misclassified images</h3>
+  <p class="note">Click one to inspect it, then delete it or move it to the right class.</p>
+  <div class="wrong" id="wrongGal"></div>
+</section>
+
+<!-- ============ 5 INFER (LIVE) ============ -->
+<section id="s-infer">
+  <h2>5 Infer (live)</h2>
+  <div class="row">
+    <button id="btnLive" class="primary">Start live</button>
+    <select class="heatAgg" aria-label="Heatmap aggregation"><option value="max">Heatmap: max over filters</option><option value="mean">Heatmap: mean over filters</option></select>
+    <label class="chk"><input type="checkbox" class="heatOverlay" checked> Overlay heatmap on image</label>
+  </div>
+  <div class="banner" id="liveBanner">-</div>
+  <div class="cam">
+    <video id="liveVideo" class="mir" playsinline muted></video>
+    <canvas id="liveHeat" width="288" height="288"></canvas>
+    <div style="flex:1;min-width:230px" id="liveBars"></div>
+  </div>
+  <p class="note">Each live frame goes through the same path as a stored image: square crop, 240x240 JPEG, decode, nearest-pixel resize to 64x64.</p>
+</section>
+
+<!-- ============ 6 SAVE ============ -->
+<section id="s-save">
+  <h2>6 Save</h2>
+  <div class="row">
+    <button id="btnSaveW" class="primary">Save weights to header/myWeights.bin</button>
+    <button id="btnSaveCfg">Write config.json only</button>
+    <button id="btnSaveZip">Save .zip</button>
+    <label class="chk"><input type="checkbox" id="zipImgs" checked> Include images in .zip</label>
+  </div>
+  <div class="info" id="saveInfo">
+    <div>SD folder mode: the existing weights file is copied to <b>myWeights.bin.bak</b> first, then the new one is written. A <b>config.json</b> with the class names and layout is written next to it. firmware-v003 and later read the class names from it at boot (older firmware ignores it). NUM_CLASSES, INPUT_SIZE and the filter counts always come from the compiled sketch.</div>
+    <div>Zip mode: Save weights keeps the model for the zip. Save .zip downloads header/myWeights.bin (and images if ticked) in the SD card layout.</div>
+  </div>
+  <p class="note" id="saveStatus"></p>
+</section>
+
+<!-- ============ 7 CONSOLE ============ -->
+<section id="s-console">
+  <h2>7 Console</h2>
+  <textarea id="console" readonly aria-label="Console log"></textarea>
+</section>
+
+<!-- ============ 8 SERIAL MONITOR ============ -->
+<section id="s-serial">
+  <h2>8 Serial monitor</h2>
+  <div class="row">
+    <button id="btnSerial" class="primary">Connect</button>
+    <span class="note" id="serStatus">Not connected.</span>
+    <label class="chk"><input type="checkbox" id="serDebug" checked> Ask the device for debug frames (firmware-v005)</label>
+  </div>
+  <textarea id="serOut" class="mono" readonly aria-label="Serial output"></textarea>
+  <div class="row">
+    <input type="text" id="serIn" placeholder="Text to send, e.g. t, l or 1" aria-label="Text to send" disabled style="flex:1;min-width:200px">
+    <button id="serSend" disabled>Send</button>
+  </div>
+  <p class="note">115200 baud, a newline is added to what you send. Close the Arduino IDE serial monitor first. Opening the port can reboot the board, and a reboot may drop the connection: press Connect again. Desktop Chrome or Edge only.</p>
+  <h3>Device view</h3>
+  <p class="note">With the box ticked, firmware-v005 sends its camera JPEG (and a heatmap) every 10th inference, each saved image, and a slow live preview while collecting. Frame lines are shown here instead of in the monitor text. With a model in memory that has the same layout, the page runs the same JPEG through its own copy of the network and compares.</p>
+  <div class="row"><label class="chk"><input type="checkbox" class="heatOverlay" checked> Overlay device heatmap on image</label></div>
+  <div class="cam">
+    <canvas id="devCanvas" width="288" height="288"></canvas>
+    <div style="flex:1;min-width:230px"><div class="info" id="devInfo">No debug frame yet. Connect, keep the box ticked, then run Infer or a collect mode on the device.</div><div id="devBars"></div></div>
+  </div>
+</section>
 
 
-// ██████████████████████████████████████████████████████████████████████████████
-// ██                                                                          ██
-// ██  PART 0: CORE SYSTEM (ALWAYS INCLUDED)                                   ██
-// ██  Headers, Defines, Pins, Globals, Memory, Weights, Setup, Loop           ██
-// ██                                                                          ██
-// ██████████████████████████████████████████████████████████████████████████████
+<!-- ============ 9 LORA NETWORK ============ -->
+<section id="s-lora">
+  <h2>9 LoRa network</h2>
+  <p class="note">Each device runs the CNN on its own camera and sends a short LoRa summary every report period (30 s default): how many frames it saw of each class. Connect <b>one</b> device in section 8. This page adds up the summaries from every device it hears, plus its own, over the window below. Class 0 is the quiet base class: when only class 0 is seen, only the date and time are shown.</p>
+  <div class="row">
+    <label class="chk">Window <input type="number" id="loraWin" value="3" min="1" max="60" style="width:72px" aria-label="Window in minutes"> minutes</label>
+    <label class="chk"><input type="checkbox" id="loraBeep"> Beep when class 1 or higher is seen</label>
+    <button id="loraCsv">Export CSV</button><button id="loraClear" class="danger">Clear</button>
+  </div>
+  <div id="loraBanner" class="lorabanner wait"><div class="big">Waiting for LoRa reports</div><div class="note">Connect a device in section 8 and wait one report period.</div></div>
+  <h3>Summed result</h3>
+  <div class="tblwrap" id="loraSum"></div>
+  <h3>Devices</h3>
+  <div class="tblwrap" id="loraDevs"></div>
+  <h3>Event log</h3>
+  <div id="loraLog"></div>
+  <h3>Send a message</h3>
+  <div class="row cmd">
+    <input type="text" id="lcMsg" maxlength="80" placeholder="Message for every LoRa device that is listening" aria-label="LoRa message" style="flex:1;min-width:220px"><button id="lcMsgB">Send message</button>
+  </div>
+  <p class="note">Sent through the connected device (section 8). Its own line and every reply from other devices appear in the event log above, with the time, the device and the signal strength.</p>
+  <h3>Settings of the connected device</h3>
+  <div class="row cmd">
+    <input type="text" id="lcName" placeholder="device-a02" aria-label="Device name"><button id="lcNameB">Set name</button>
+    <input type="number" id="lcRep" placeholder="30" min="5" max="3600" aria-label="Report seconds"><button id="lcRepB">Set report s</button>
+    <input type="number" id="lcConf" placeholder="60" min="0" max="100" aria-label="Minimum confidence"><button id="lcConfB">Set min conf %</button>
+    <input type="number" id="lcCh" placeholder="0" min="0" max="120" aria-label="Channel"><button id="lcChB">Set channel</button>
+    <button id="lcInfoB">Refresh info</button>
+  </div>
+  <div class="row cmd">
+    <select id="lcAuto" aria-label="Start inference by itself after a power cycle"><option value="on">Inference starts by itself after power-up</option><option value="off">Stay in the menu after power-up</option></select><button id="lcAutoB">Set power-up behaviour</button>
+    <button id="lcSetB">Show all settings</button><button id="lcResetB" class="danger">Reset to defaults</button>
+  </div>
+  <p class="note">"Show all settings" prints the list in the serial monitor (section 8), including which values are defaults and which are saved in the device. The defaults themselves are in the USER SETTINGS block at the top of the firmware.</p>
+  <p class="note" id="loraInfo">No device info yet. All devices must use the same channel. Name, report period, confidence and channel are saved in the device.</p>
+</section>
 
+</main>
 
-// optional Uncomment AFTER copying myWeights.h from SD to your sketch folder:
-// Priority order: SD weights > baked-in weights > random He-init
-//////////////////////////////////////IMPORTANT/////////////////////////////////////////////////
-//#define USE_BAKED_WEIGHTS
+<!-- Inspector -->
+<dialog id="insp">
+  <div class="row" style="justify-content:space-between;margin-top:0">
+    <strong id="inspTitle"></strong>
+    <button id="inspClose">Close</button>
+  </div>
+  <div class="inspBody">
+    <canvas id="inspCanvas" width="480" height="480"></canvas>
+    <div class="inspSide">
+      <div id="inspProbs"></div>
+      <div class="row">
+        <select class="heatAgg" aria-label="Heatmap aggregation"><option value="max">Heatmap: max over filters</option><option value="mean">Heatmap: mean over filters</option></select>
+      </div>
+      <label class="chk"><input type="checkbox" class="heatOverlay" checked> Overlay heatmap on image</label>
+      <p class="note">Heatmap: last conv layer, blue = low, red = high. Position is approximate (the last conv map is stretched over the image).</p>
+      <div class="row"><select id="inspMove" aria-label="Move to class"></select><button id="inspMoveBtn">Move</button></div>
+      <div class="row"><button id="inspParity">Print parity line</button><button id="inspDelete" class="danger">Delete image</button></div>
+    </div>
+  </div>
+</dialog>
 
-#ifdef USE_BAKED_WEIGHTS
-  #include "myWeights.h"
-#endif
+<!-- Review -->
+<dialog id="rev">
+  <div class="row" style="justify-content:space-between;margin-top:0">
+    <strong>Review images</strong>
+    <button id="revClose">Close</button>
+  </div>
+  <div class="row">
+    <select id="revClass" aria-label="Class to review"></select>
+    <label class="chk"><input type="checkbox" id="revSusp"> Suspicious first (needs a model)</label>
+  </div>
+  <div class="inspBody">
+    <div>
+      <div class="revframe" id="revFrame"><img id="revImg" alt=""><span class="revtag">MARKED BAD</span></div>
+      <p class="note" id="revCount"></p>
+    </div>
+    <div class="inspSide">
+      <div id="revPred" class="info">-</div>
+      <div class="row"><button id="revPrev">Previous (←)</button><button id="revNext">Next (→)</button></div>
+      <div class="row"><button id="revMark" class="danger">Mark bad (X)</button><button id="revNextClass">Next class</button></div>
+      <div class="row"><button id="revDelete" class="danger">Delete marked (0)</button><button id="revClear">Clear marks</button></div>
+      <p class="note">Marking deletes nothing. Delete marked asks once, then removes every marked image. Keys: arrows to move, X to mark and advance.</p>
+    </div>
+  </div>
+</dialog>
 
-#include "esp_camera.h"
-#include "img_converters.h"
-#include "FS.h"
-#include "SD.h"
-#include "SPI.h"
-#include <vector>
-#include <algorithm>
-#include <U8g2lib.h>
-#include <Wire.h>
-#include "mbedtls/base64.h"   // v47: base64 for the Web Serial debug frames
-#include <RadioLib.h>        // LoRa v001
-#include <Preferences.h>     // LoRa v001: name and radio settings kept in flash
+<script>
+'use strict';
+const VERSION = 'lora-v004';
 
-U8G2_SSD1306_72X40_ER_1_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE);
+/* ==CORE START== (no DOM use below this line until CORE END) */
 
-// ======================================================
-// CONFIGURATION & ML HYPERPARAMETERS (MOVED UP)
-// ======================================================
+// ---- Architecture constants, copied from the firmware ----
+// Layout is variable (compile-time in the firmware): INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS. Kernel is fixed at 3x3.
+const SRC = 240;                                 // camera frame size
+let IN = 64, C1F = 4, C2F = 8, C1O, P1O, C2O, C1W, C2W, FLAT, LUT = null;
+function buildLUT() { const t = new Int32Array(IN); for (let i = 0; i < IN; i++) t[i] = Math.min(Math.floor((i + 0.5) * SRC / IN), SRC - 1); return t; }
+function setLayout(i, a, b) {
+  IN = i; C1F = a; C2F = b; C1O = IN - 2; P1O = C1O / 2; C2O = P1O - 2;
+  C1W = 27 * C1F; C2W = 9 * C1F * C2F; FLAT = C2O * C2O * C2F; LUT = buildLUT();
+}
+const layoutKey = () => IN + 'x' + C1F + 'x' + C2F;
+const layoutValid = (i, a, b) => Number.isInteger(i) && Number.isInteger(a) && Number.isInteger(b) && i >= 16 && i <= 128 && i % 2 === 0 && a >= 1 && a <= 16 && b >= 1 && b <= 32;
+// All layouts whose weight file would be exactly `bytes` long for N classes (used to explain or infer a mismatch).
+function findLayouts(bytes, N) {
+  const out = [];
+  for (let i = 16; i <= 128; i += 2) { const c2o = (i - 2) / 2 - 2;
+    for (let a = 1; a <= 16; a++) for (let b = 1; b <= 32; b++)
+      if ((27 * a + a + 9 * a * b + b + c2o * c2o * b * N + N) * 4 === bytes) out.push([i, a, b]); }
+  return out;
+}
+const PARAM_ORDER = ['c1w', 'c1b', 'c2w', 'c2b', 'ow', 'ob']; // file write order in mySaveWeights()
+const paramSizes = N => ({ c1w: C1W, c1b: C1F, c2w: C2W, c2b: C2F, ow: FLAT * N, ob: N });
+const totalFloats = N => C1W + C1F + C2W + C2F + FLAT * N + N;
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const mc = new MessageChannel(); let tickRes = null;
+mc.port1.onmessage = () => { const r = tickRes; tickRes = null; if (r) r(); };
+const tick = () => new Promise(r => { tickRes = r; mc.port2.postMessage(0); });
 
-#define NUM_CLASSES 3
+function clipv(v, mn = -100, mx = 100) { if (!Number.isFinite(v)) return 0; return v < mn ? mn : (v > mx ? mx : v); }
+const lrelu = x => x > 0 ? x : 0.1 * x;
+const lrd = x => x > 0 ? 1 : 0.1;
 
-String myClassLabels[NUM_CLASSES] = {"0Blank", "1Cup", "2Pen"};
+function zerosFor(N) { const s = paramSizes(N), o = {}; for (const k of PARAM_ORDER) o[k] = new Float32Array(s[k]); return o; }
 
-const int myTotalItems = NUM_CLASSES + 3;      // NUM_CLASSES + 3: classes, Train, Infer and (v003) LoRa messages
-
-float LEARNING_RATE = 0.0003;
-int BATCH_SIZE = 6;
-int TARGET_EPOCHS = 20;
-int VALIDATION_IMAGES = 3;  // v44: last N images per class held out for validation (0 = disabled)
-
-const int myThresholdPress = 1100;
-const int myThresholdRelease = 900;
-//const unsigned long myScreenTimeout = 300000; // not used presently
-
-
-// ======================================================
-// CAMERA IMAGE SETTINGS (v45)
-// The web trainer page shows images upright, mirrored left-right. To match it the sensor is
-// mirrored AND flipped vertically. Brightness and AE level range from -2 to 2 (0 = sensor default).
-// If images are still darker than the web page, raise MY_CAM_BRIGHTNESS or MY_CAM_AE_LEVEL to 2.
-// If they wash out, lower them. Existing images on the SD card are NOT changed by these settings.
-// ======================================================
-#define MY_CAM_HMIRROR        1
-#define MY_CAM_VFLIP          1
-#define MY_CAM_BRIGHTNESS     1
-#define MY_CAM_AE_LEVEL       1
-#define MY_CAM_WARMUP_FRAMES  5   // frames discarded after start so auto exposure can settle
-
-
-
-
-
-// ======================================================
-// UNIFIED TOUCH INPUT SYSTEM - IMPROVED FOR COMPUTATION
-// ======================================================
-struct TouchState {
-  bool isTouching = false;
-  int tapCount = 0;
-  unsigned long firstTapTime = 0;
-  unsigned long lastReleaseTime = 0;
-  unsigned long lastCheckTime = 0;  // NEW: track when we last checked
-  const unsigned long tapWindow = 800;        // INCREASED from 450ms for slow contexts
-  const int longPressTaps = 3;                // 3+ taps = long press
-  const unsigned long debounceDelay = 50;     // debounce time
-};
-
-
-TouchState myTouch;
-
-
-
-
-
-
-
-
-// SYSTEM LOGIC VARIABLES
-unsigned long myLastActivityTime = 0; 
-unsigned long myLastTapTime = 0;
-const int myTapCooldown = 250;
-int myMenuIndex = 1;
-bool myIsSelected = false;
-bool myWeightsTrained = false; 
-
-// XIAO ESP32-S3 Camera Pins
-#define PWDN_GPIO_NUM     -1
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM     10
-#define SIOD_GPIO_NUM     40
-#define SIOC_GPIO_NUM     39
-#define Y9_GPIO_NUM       48
-#define Y8_GPIO_NUM       11
-#define Y7_GPIO_NUM       12
-#define Y6_GPIO_NUM       14
-#define Y5_GPIO_NUM       16
-#define Y4_GPIO_NUM       18
-#define Y3_GPIO_NUM       17
-#define Y2_GPIO_NUM       15
-#define VSYNC_GPIO_NUM    38
-#define HREF_GPIO_NUM     47
-#define PCLK_GPIO_NUM     13
-
-// ======================================================
-// CONFIGURABLE INPUT RESOLUTION
-// Square and EVEN (the 2x2 max pool needs INPUT_SIZE-2 to be even). Web page supports 16..128.
-// Images on the SD card are always 240x240; they are resampled to INPUT_SIZE when loaded.
-// Larger sizes train and infer much more slowly (cost grows with the square of INPUT_SIZE).
-// ======================================================
-#define INPUT_SIZE 64
-
-// ======================================================
-// CNN ARCHITECTURE CONSTANTS
-// The web trainer page shows the matching #define lines for these values.
-// CONV1_FILTERS and CONV2_FILTERS can be changed. The 3x3 kernel is fixed in the loops below,
-// so CONV*_KERNEL_SIZE is informational only.
-// ======================================================
-#define CONV1_KERNEL_SIZE 3
-#define CONV1_FILTERS 4
-#define CONV1_WEIGHTS (CONV1_KERNEL_SIZE * CONV1_KERNEL_SIZE * 3 * CONV1_FILTERS)
-
-#define CONV2_KERNEL_SIZE 3
-#define CONV2_FILTERS 8
-#define CONV2_WEIGHTS (CONV2_KERNEL_SIZE * CONV2_KERNEL_SIZE * CONV1_FILTERS * CONV2_FILTERS)
-
-// v45: number of weights one conv2 filter owns (was the hard-coded 36 when CONV1_FILTERS was 4)
-#define CONV2_IN_STRIDE (CONV1_FILTERS * 9)
-
-#define CONV1_OUTPUT_SIZE (INPUT_SIZE - 2)
-#define POOL1_OUTPUT_SIZE (CONV1_OUTPUT_SIZE / 2)
-#define CONV2_OUTPUT_SIZE (POOL1_OUTPUT_SIZE - 2)
-#define FLATTENED_SIZE (CONV2_OUTPUT_SIZE * CONV2_OUTPUT_SIZE * CONV2_FILTERS)
-
-#define OUTPUT_WEIGHTS (FLATTENED_SIZE * NUM_CLASSES)
-
-static_assert(INPUT_SIZE % 2 == 0, "INPUT_SIZE must be even");
-static_assert(CONV2_OUTPUT_SIZE >= 1, "INPUT_SIZE is too small");
-
-// v45: exact size in bytes of header/myWeights.bin for this sketch's layout
-#define MY_EXPECTED_WEIGHT_BYTES ((size_t)(CONV1_WEIGHTS + CONV1_FILTERS + CONV2_WEIGHTS + CONV2_FILTERS + OUTPUT_WEIGHTS + NUM_CLASSES) * 4)
-
-// ======================================================
-// GLOBAL VARIABLE DEFINITIONS
-// ======================================================
-
-// Add near line 150 with other global buffers:
-uint8_t* myRgbBuffer = nullptr;  // Reusable RGB buffer for inference
-
-bool mySDavailable = false;  // set true in setup() if SD mounts ok
-
-// ML Buffers (PSRAM)
-float* myInputBuffer = nullptr;
-float* myConv1_w = nullptr;
-float* myConv1_b = nullptr;
-float* myConv2_w = nullptr;
-float* myConv2_b = nullptr;
-float* myOutput_w = nullptr;
-float* myOutput_b = nullptr;
-
-// Gradient buffers
-float* myConv1_w_grad = nullptr;
-float* myConv1_b_grad = nullptr;
-float* myConv2_w_grad = nullptr;
-float* myConv2_b_grad = nullptr;
-float* myOutput_w_grad = nullptr;
-float* myOutput_b_grad = nullptr;
-
-// Adam optimizer momentum buffers
-float* myConv1_w_m = nullptr;
-float* myConv1_w_v = nullptr;
-float* myConv1_b_m = nullptr;
-float* myConv1_b_v = nullptr;
-float* myConv2_w_m = nullptr;
-float* myConv2_w_v = nullptr;
-float* myConv2_b_m = nullptr;
-float* myConv2_b_v = nullptr;
-float* myOutput_w_m = nullptr;
-float* myOutput_w_v = nullptr;
-float* myOutput_b_m = nullptr;
-float* myOutput_b_v = nullptr;
-
-// Forward pass buffers
-float* myConv1_output = nullptr;
-float* myPool1_output = nullptr;
-float* myConv2_output = nullptr;
-float* myDense_output = nullptr;
-
-// Backward pass buffers
-float* myDense_grad = nullptr;
-float* myConv2_grad = nullptr;
-float* myPool1_grad = nullptr;
-float* myConv1_grad = nullptr;
-
-struct TrainingItem {
-  String path;
-  int label;
-};
-std::vector<TrainingItem> myTrainingData;
-
-// ======================================================
-// UTILITY FUNCTIONS
-// ======================================================
-inline float clip_value(float v, float mn=-100, float mx=100) {
-  if(isnan(v)||isinf(v)) return 0;
-  return constrain(v,mn,mx);
+function heInit(net) {
+  const w = net.w, fill = (a, std) => { for (let i = 0; i < a.length; i++) a[i] = (Math.random() - 0.5) * 2 * std; };
+  fill(w.c1w, Math.sqrt(2 / (9 * 3))); w.c1b.fill(0);
+  fill(w.c2w, Math.sqrt(2 / (C1F * 9)));      w.c2b.fill(0);
+  fill(w.ow, Math.sqrt(2 / FLAT));     w.ob.fill(0);
 }
 
-inline float leaky_relu(float x) { return x>0 ? x : 0.1f*x; }
-inline float leaky_relu_deriv(float x) { return x>0 ? 1.0f : 0.1f; }
-
-// ======================================================
-// UNIFIED TOUCH INPUT FUNCTIONS - NEW!
-// ======================================================
-int myReadTouch() {
-  int sum = 0;
-  for (int i = 0; i < 3; i++) {
-    sum += analogRead(A0);
-    delayMicroseconds(100);
-  }
-  return sum / 3;
+function makeNet(N) {
+  const net = { N, key: layoutKey(), w: zerosFor(N), g: zerosFor(N), m: zerosFor(N), v: zerosFor(N), a: {
+    c1o: new Float32Array(C1F * C1O * C1O), p1o: new Float32Array(C1F * P1O * P1O), c2o: new Float32Array(FLAT),
+    logits: new Float32Array(N), probs: new Float32Array(N), din: null, dinBuf: null,
+    dg: new Float32Array(FLAT), c2g: new Float32Array(FLAT),
+    p1g: new Float32Array(C1F * P1O * P1O), c1g: new Float32Array(C1F * C1O * C1O) } };
+  heInit(net);
+  return net;
 }
 
-void myResetTouchState() {
-  myTouch.isTouching = false;
-  myTouch.tapCount = 0;
-  myTouch.firstTapTime = 0;
-  myTouch.lastReleaseTime = 0;
-  myTouch.lastCheckTime = 0;
-}
-
-// NEW: Background touch monitor that can be called less frequently
-void myUpdateTouchState() {
-  unsigned long now = millis();
-  
-  // Only check every 20ms to avoid overwhelming analogRead
-  if (now - myTouch.lastCheckTime < 20) return;
-  myTouch.lastCheckTime = now;
-  
-  int val = myReadTouch();
-  bool touchActive = myTouch.isTouching 
-                      ? (val > myThresholdRelease) 
-                      : (val > myThresholdPress);
-
-  // Touch just started
-  if (touchActive && !myTouch.isTouching) {
-    if (now - myTouch.lastReleaseTime < myTouch.debounceDelay) {
-      return; // Debounce
-    }
-    
-    myTouch.isTouching = true;
-    
-    // First tap or within tap window?
-    if (myTouch.tapCount == 0 || (now - myTouch.firstTapTime < myTouch.tapWindow)) {
-      if (myTouch.tapCount == 0) {
-        myTouch.firstTapTime = now;
+// Forward pass: line-by-line port of myForwardPass(). inp is HWC RGB floats 0..1.
+// mask (optional, training only) is an inverted-dropout mask on the flattened layer.
+function forward(net, inp, mask) {
+  const w = net.w, a = net.a, N = net.N, c1o = a.c1o, p1o = a.p1o, c2o = a.c2o;
+  for (let f = 0; f < C1F; f++) {
+    const o = f * C1O * C1O, b = w.c1b[f];
+    for (let y = 0; y < C1O; y++) for (let xx = 0; xx < C1O; xx++) {
+      let s = 0;
+      for (let ky = 0; ky < 3; ky++) for (let kx = 0; kx < 3; kx++) {
+        const ip = ((y + ky) * IN + (xx + kx)) * 3, wp = f * 27 + ky * 9 + kx * 3;
+        s += inp[ip] * w.c1w[wp] + inp[ip + 1] * w.c1w[wp + 1] + inp[ip + 2] * w.c1w[wp + 2];
       }
-      myTouch.tapCount++;
-      Serial.printf("Tap #%d\n", myTouch.tapCount);
-    } else {
-      // Window expired, reset
-      myTouch.tapCount = 1;
-      myTouch.firstTapTime = now;
-      Serial.println("Tap #1 (new window)");
+      c1o[o + y * C1O + xx] = lrelu(clipv(s + b));
     }
   }
-  
-  // Touch released
-  if (!touchActive && myTouch.isTouching) {
-    myTouch.isTouching = false;
-    myTouch.lastReleaseTime = now;
+  for (let f = 0; f < C1F; f++) {
+    const ib = f * C1O * C1O, o = f * P1O * P1O;
+    for (let y = 0; y < P1O; y++) for (let xx = 0; xx < P1O; xx++) {
+      const i0 = ib + y * 2 * C1O + xx * 2, i2 = i0 + C1O;
+      p1o[o + y * P1O + xx] = Math.max(c1o[i0], c1o[i0 + 1], c1o[i2], c1o[i2 + 1]);
+    }
   }
-}
-
-// Returns: 0=no action, 1=tap, 2=long press (3+ taps)
-// NOTE: Always call myUpdateTouchState() before this in tight loops
-int myCheckTouchInput() {
-  myUpdateTouchState();  // Update state first
-  
-  unsigned long now = millis();
-  
-  // Check if tap window expired and we have taps
-  if (myTouch.tapCount > 0 && !myTouch.isTouching) {
-    if (now - myTouch.firstTapTime > myTouch.tapWindow) {
-      int result = (myTouch.tapCount >= myTouch.longPressTaps) ? 2 : 1;
-      int count = myTouch.tapCount;
-      myResetTouchState();
-      
-      if (result == 2) {
-        Serial.printf("LONG PRESS detected (%d taps)\n", count);
-      } else {
-        Serial.printf("TAP detected (%d tap%s)\n", count, count > 1 ? "s" : "");
+  for (let f = 0; f < C2F; f++) {
+    const o = f * C2O * C2O, b = w.c2b[f];
+    for (let y = 0; y < C2O; y++) for (let xx = 0; xx < C2O; xx++) {
+      let s = 0;
+      for (let c = 0; c < C1F; c++) {
+        const ib = c * P1O * P1O;
+        for (let ky = 0; ky < 3; ky++) for (let kx = 0; kx < 3; kx++)
+          s += p1o[ib + (y + ky) * P1O + (xx + kx)] * w.c2w[f * 9 * C1F + c * 9 + ky * 3 + kx];
       }
-      return result;
+      c2o[o + y * C2O + xx] = lrelu(clipv(s + b));
     }
   }
-  
-  return 0;
-}
-
-// NEW: Non-blocking check - just updates state without consuming events
-// Use this in heavy computation loops
-void myCheckTouchBackground() {
-  myUpdateTouchState();
-}
-
-// NEW: Check if we have a pending action without consuming it
-int myPeekTouchAction() {
-  myUpdateTouchState();
-  unsigned long now = millis();
-  
-  if (myTouch.tapCount > 0 && !myTouch.isTouching) {
-    if (now - myTouch.firstTapTime > myTouch.tapWindow) {
-      return (myTouch.tapCount >= myTouch.longPressTaps) ? 2 : 1;
-    }
+  let din = c2o;
+  if (mask) { din = a.dinBuf || (a.dinBuf = new Float32Array(FLAT)); for (let i = 0; i < FLAT; i++) din[i] = c2o[i] * mask[i]; }
+  a.din = din;
+  for (let c = 0; c < N; c++) {
+    let s = 0; const base = c * FLAT;
+    for (let i = 0; i < FLAT; i++) s += din[i] * w.ow[base + i];
+    a.logits[c] = clipv(s + w.ob[c], -50, 50);
   }
-  return 0;
+  let mx = a.logits[0]; for (let i = 1; i < N; i++) mx = Math.max(mx, a.logits[i]);
+  let es = 0; for (let i = 0; i < N; i++) es += Math.exp(a.logits[i] - mx);
+  for (let i = 0; i < N; i++) a.probs[i] = Math.exp(a.logits[i] - mx) / es;
 }
 
-
-
-
-// ======================================================
-// MEMORY ALLOCATION
-// ======================================================
-void myAllocateMemory() {
-  if (myInputBuffer != nullptr) return;
-  
-  Serial.println("\n=== Allocating Memory ===");
-  
-  myInputBuffer = (float*)ps_malloc(INPUT_SIZE * INPUT_SIZE * 3 * sizeof(float));
-  myConv1_w = (float*)ps_malloc(CONV1_WEIGHTS * sizeof(float));
-  myConv1_b = (float*)ps_malloc(CONV1_FILTERS * sizeof(float));
-  myConv2_w = (float*)ps_malloc(CONV2_WEIGHTS * sizeof(float));
-  myConv2_b = (float*)ps_malloc(CONV2_FILTERS * sizeof(float));
-  myOutput_w = (float*)ps_malloc(OUTPUT_WEIGHTS * sizeof(float));
-  myOutput_b = (float*)ps_malloc(NUM_CLASSES * sizeof(float));
-
-  myConv1_w_grad = (float*)ps_malloc(CONV1_WEIGHTS * sizeof(float));
-  myConv1_b_grad = (float*)ps_malloc(CONV1_FILTERS * sizeof(float));
-  myConv2_w_grad = (float*)ps_malloc(CONV2_WEIGHTS * sizeof(float));
-  myConv2_b_grad = (float*)ps_malloc(CONV2_FILTERS * sizeof(float));
-  myOutput_w_grad = (float*)ps_malloc(OUTPUT_WEIGHTS * sizeof(float));
-  myOutput_b_grad = (float*)ps_malloc(NUM_CLASSES * sizeof(float));
-
-  myConv1_w_m = (float*)ps_calloc(CONV1_WEIGHTS, sizeof(float));
-  myConv1_w_v = (float*)ps_calloc(CONV1_WEIGHTS, sizeof(float));
-  myConv1_b_m = (float*)ps_calloc(CONV1_FILTERS, sizeof(float));
-  myConv1_b_v = (float*)ps_calloc(CONV1_FILTERS, sizeof(float));
-  myConv2_w_m = (float*)ps_calloc(CONV2_WEIGHTS, sizeof(float));
-  myConv2_w_v = (float*)ps_calloc(CONV2_WEIGHTS, sizeof(float));
-  myConv2_b_m = (float*)ps_calloc(CONV2_FILTERS, sizeof(float));
-  myConv2_b_v = (float*)ps_calloc(CONV2_FILTERS, sizeof(float));
-  myOutput_w_m = (float*)ps_calloc(OUTPUT_WEIGHTS, sizeof(float));
-  myOutput_w_v = (float*)ps_calloc(OUTPUT_WEIGHTS, sizeof(float));
-  myOutput_b_m = (float*)ps_calloc(NUM_CLASSES, sizeof(float));
-  myOutput_b_v = (float*)ps_calloc(NUM_CLASSES, sizeof(float));
-
-  myConv1_output = (float*)ps_malloc(CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE*CONV1_FILTERS*sizeof(float));
-  myPool1_output = (float*)ps_malloc(POOL1_OUTPUT_SIZE*POOL1_OUTPUT_SIZE*CONV1_FILTERS*sizeof(float));
-  myConv2_output = (float*)ps_malloc(CONV2_OUTPUT_SIZE*CONV2_OUTPUT_SIZE*CONV2_FILTERS*sizeof(float));
-  myDense_output = (float*)ps_malloc(NUM_CLASSES*sizeof(float));
-
-  myDense_grad = (float*)ps_malloc(FLATTENED_SIZE*sizeof(float));
-  myConv2_grad = (float*)ps_malloc(CONV2_OUTPUT_SIZE*CONV2_OUTPUT_SIZE*CONV2_FILTERS*sizeof(float));
-  myPool1_grad = (float*)ps_malloc(POOL1_OUTPUT_SIZE*POOL1_OUTPUT_SIZE*CONV1_FILTERS*sizeof(float));
-  myConv1_grad = (float*)ps_malloc(CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE*CONV1_FILTERS*sizeof(float));
-
-  if (!myInputBuffer || !myConv1_w || !myConv2_w || !myOutput_w || 
-      !myConv1_output || !myPool1_output || !myConv2_output) {
-    Serial.println("FATAL: PSRAM allocation failed!");
-    u8g2.firstPage();
-    do { u8g2.drawStr(0, 15, "PSRAM ERROR!"); } while (u8g2.nextPage());
-    while(1) { delay(1000); }
+// Backward pass for one image. Gradients accumulate (+=) into net.g across the batch, as on the device.
+function backward(net, inp, label, mask) {
+  const w = net.w, g = net.g, a = net.a, N = net.N, p = a.probs, din = a.din, dg = a.dg;
+  dg.fill(0);
+  for (let c = 0; c < N; c++) {
+    const err = p[c] - (c === label ? 1 : 0), base = c * FLAT;
+    for (let i = 0; i < FLAT; i++) { g.ow[base + i] += err * din[i]; dg[i] += err * w.ow[base + i]; }
+    g.ob[c] += err;
   }
-
-  Serial.printf("Free PSRAM after allocation: %d bytes\n", ESP.getFreePsram());
-
-  // Initialize weights with He initialization
-  float c1std = sqrt(2.0/(9.0*3));
-  for(int i=0; i<CONV1_WEIGHTS; i++) myConv1_w[i] = ((float)rand()/RAND_MAX - 0.5f) * 2.0f * c1std;
-  for(int i=0; i<CONV1_FILTERS; i++) myConv1_b[i] = 0;
-  
-  float c2std = sqrt(2.0/(double)CONV2_IN_STRIDE);   // v45: was sqrt(2.0/36.0)
-  for(int i=0; i<CONV2_WEIGHTS; i++) myConv2_w[i] = ((float)rand()/RAND_MAX - 0.5f) * 2.0f * c2std;
-  for(int i=0; i<CONV2_FILTERS; i++) myConv2_b[i] = 0;
-  
-  float dstd = sqrt(2.0/FLATTENED_SIZE);
-  for(int i=0; i<OUTPUT_WEIGHTS; i++) myOutput_w[i] = ((float)rand()/RAND_MAX - 0.5f) * 2.0f * dstd;
-  for(int i=0; i<NUM_CLASSES; i++) myOutput_b[i] = 0;
-  Serial.println("He-init random weights set");
-}
-
-// ======================================================
-// WEIGHT SAVE/LOAD
-// ======================================================
-void myExportHeader() {
-  if (!mySDavailable) {
-    Serial.println("No SD card - cannot export header");
-    return;
-  }
-  if (!SD.exists("/header")) SD.mkdir("/header");
-  File file = SD.open("/header/myWeights.h", FILE_WRITE);
-  if (!file) return;
-  file.println("#ifndef MY_MODEL_H\n#define MY_MODEL_H");
-  file.println("// ======================================================");
-  file.println("// IMPORTANT: After copying this file to your sketch folder,");
-  file.println("// update ALL of the following lines in your main sketch");
-  file.println("// to match the layout, number of classes and labels used during training:");
-  file.println("//");
-  file.printf( "//   #define INPUT_SIZE %d\n", INPUT_SIZE);
-  file.printf( "//   #define CONV1_FILTERS %d\n", CONV1_FILTERS);
-  file.printf( "//   #define CONV2_FILTERS %d\n", CONV2_FILTERS);
-  file.printf( "//   #define NUM_CLASSES %d\n", NUM_CLASSES);
-
-  file.print("//   String myClassLabels[NUM_CLASSES] = {");
-  for (int i = 0; i < NUM_CLASSES; i++) {
-    file.printf("\"%s\"", myClassLabels[i].c_str());
-    if (i < NUM_CLASSES - 1) file.print(", ");
-  }
-  file.println("};");
-
- // file.println("//   String myClassLabels[NUM_CLASSES] = {\"0Blank\", \"1Cup\", \"2Pen\", ...};");
-  file.println("//");
-  file.println("// Then uncomment:  #define USE_BAKED_WEIGHTS");
-  file.println("// ======================================================");
-  auto myDump = [&](const char* name, float* data, int size) {
-    file.printf("const float %s[] = { ", name);
-    for(int i=0; i<size; i++) {
-      file.print(data[i], 6); file.print("f");
-      if(i < size-1) file.print(", ");
-      if((i+1)%8 == 0) file.println();
-    }
-    file.println(" };");
-  };
-  myDump("myModel_conv1_w",  myConv1_w,  CONV1_WEIGHTS);
-  myDump("myModel_conv1_b",  myConv1_b,  CONV1_FILTERS);
-  myDump("myModel_conv2_w",  myConv2_w,  CONV2_WEIGHTS);
-  myDump("myModel_conv2_b",  myConv2_b,  CONV2_FILTERS);
-  myDump("myModel_output_w", myOutput_w, OUTPUT_WEIGHTS);
-  myDump("myModel_output_b", myOutput_b, NUM_CLASSES);
-  file.println("#endif");
-  Serial.println("You can copy /header/myWeights.h to the sketch folder, then uncomment #define USE_BAKED_WEIGHTS");
-  file.close();
-}
-
-bool myLoadWeights() {
-  if (!mySDavailable) {
-    Serial.println("No SD card - skipping weight load");
-    return false;
-  }
-  if (!SD.exists("/header/myWeights.bin")) {
-    Serial.println("No SD weights file found");
-    return false;
-  }
-  Serial.println("Loading weights from SD...");
-  File f = SD.open("/header/myWeights.bin", FILE_READ);
-  if (!f) return false;
-
-  // v45: refuse a weights file that does not match this sketch's layout and class count
-  if ((size_t)f.size() != MY_EXPECTED_WEIGHT_BYTES) {
-    Serial.printf("REFUSED myWeights.bin: file is %u bytes but this sketch needs %u bytes\n",
-                  (unsigned)f.size(), (unsigned)MY_EXPECTED_WEIGHT_BYTES);
-    Serial.printf("Sketch layout: INPUT_SIZE %d, CONV1_FILTERS %d, CONV2_FILTERS %d, NUM_CLASSES %d\n",
-                  INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS, NUM_CLASSES);
-    Serial.println("Match these #defines to the web trainer page, or retrain. Using random/baked weights instead.");
-    f.close();
-    return false;
-  }
-
-  f.read((uint8_t*)myConv1_w, CONV1_WEIGHTS*4); 
-  f.read((uint8_t*)myConv1_b, CONV1_FILTERS*4);
-  f.read((uint8_t*)myConv2_w, CONV2_WEIGHTS*4); 
-  f.read((uint8_t*)myConv2_b, CONV2_FILTERS*4);
-  f.read((uint8_t*)myOutput_w, OUTPUT_WEIGHTS*4); 
-  f.read((uint8_t*)myOutput_b, NUM_CLASSES*4);
-  f.close();
-  Serial.println("Weights loaded successfully");
-  myWeightsTrained = true;
-  return true;
-}
-
-// ======================================================
-// v46: READ CLASS LABELS FROM /header/config.json
-// The web trainer page writes this file. Only the "classes" list is used, and only when it has exactly
-// NUM_CLASSES entries. The sketch's compiled myClassLabels[] are the fallback.
-// ======================================================
-// ==CFG PARSE START==
-static bool myJsonInt(const String& t, const char* key, int& out) {
-  String k("\"");
-  k += key;
-  k += "\"";
-  int p = t.indexOf(k.c_str());
-  if (p < 0) return false;
-  p = t.indexOf(':', p);
-  if (p < 0) return false;
-  p++;
-  int len = (int)t.length();
-  while (p < len && (t[p] == ' ' || t[p] == '\n' || t[p] == '\r' || t[p] == '\t')) p++;
-  bool neg = false;
-  if (p < len && t[p] == '-') { neg = true; p++; }
-  if (p >= len || t[p] < '0' || t[p] > '9') return false;
-  long v = 0;
-  while (p < len && t[p] >= '0' && t[p] <= '9') { v = v * 10 + (t[p] - '0'); p++; }
-  out = (int)(neg ? -v : v);
-  return true;
-}
-
-// Returns the number of strings found in the JSON array named key, or -1 if the key or array is missing.
-static int myJsonStringArray(const String& t, const char* key, std::vector<String>& out) {
-  String k("\"");
-  k += key;
-  k += "\"";
-  int p = t.indexOf(k.c_str());
-  if (p < 0) return -1;
-  p = t.indexOf('[', p);
-  if (p < 0) return -1;
-  p++;
-  int len = (int)t.length();
-  out.clear();
-  while (p < len) {
-    char c = t[p];
-    if (c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == ',') { p++; continue; }
-    if (c == ']') break;
-    if (c != '"') return -1;              // not a list of strings
-    p++;
-    String s("");
-    while (p < len && t[p] != '"') {
-      if (t[p] == '\\' && p + 1 < len) p++;   // keep the escaped character
-      s += t[p];
-      p++;
-    }
-    if (p >= len) return -1;              // unterminated string
-    p++;                                  // closing quote
-    out.push_back(s);
-  }
-  return (int)out.size();
-}
-// ==CFG PARSE END==
-
-void myLoadConfig() {
-  if (!mySDavailable) return;
-  if (!SD.exists("/header/config.json")) {
-    Serial.println("No /header/config.json - using the class labels compiled into the sketch");
-    return;
-  }
-  File f = SD.open("/header/config.json", FILE_READ);
-  if (!f) return;
-  size_t sz = f.size();
-  if (sz == 0 || sz > 4096) {
-    Serial.printf("config.json ignored: unexpected size %u bytes\n", (unsigned)sz);
-    f.close();
-    return;
-  }
-  String txt;
-  txt.reserve(sz + 1);
-  while (f.available()) txt += (char)f.read();
-  f.close();
-
-  std::vector<String> names;
-  int n = myJsonStringArray(txt, "classes", names);
-  if (n < 0) {
-    Serial.println("config.json has no readable \"classes\" list - keeping the compiled class labels");
-  } else if (n != NUM_CLASSES) {
-    Serial.printf("config.json lists %d classes but the sketch has NUM_CLASSES %d - keeping the compiled labels.\n", n, NUM_CLASSES);
-    Serial.println("To add or remove classes, change NUM_CLASSES and myClassLabels[] in the sketch and reflash.");
-  } else {
-    Serial.println("Class labels loaded from /header/config.json:");
-    for (int i = 0; i < NUM_CLASSES; i++) {
-      myClassLabels[i] = names[i];
-      Serial.printf("  %d: %s\n", i, myClassLabels[i].c_str());
-    }
-  }
-
-  int v;
-  if (myJsonInt(txt, "input_size", v) && v != INPUT_SIZE)
-    Serial.printf("WARNING: config.json input_size %d but the sketch INPUT_SIZE is %d\n", v, INPUT_SIZE);
-  if (myJsonInt(txt, "conv1_filters", v) && v != CONV1_FILTERS)
-    Serial.printf("WARNING: config.json conv1_filters %d but the sketch CONV1_FILTERS is %d\n", v, CONV1_FILTERS);
-  if (myJsonInt(txt, "conv2_filters", v) && v != CONV2_FILTERS)
-    Serial.printf("WARNING: config.json conv2_filters %d but the sketch CONV2_FILTERS is %d\n", v, CONV2_FILTERS);
-}
-
-// ======================================================
-// v47: WEB SERIAL DEBUG FRAMES
-// The web trainer page sends 'D' when it connects and every 5 s, and 'd' when it disconnects.
-// While a 'D' was seen in the last 15 s the device prints frame lines that start with "@F":
-//   @F <kind> <n> <pred> <probs|-> <logits|-> <layout> <centre RGB|-> <heatSide> <heat base64|0/-> <jpeg base64>
-// kind I = inference (every 10th frame), C = image just saved, P = live preview while collecting (about 1/s)
-// The JPEG is exactly what the camera produced. Heat = max over conv2 filters, scaled 0..255.
-// ======================================================
-// ==DBG START==
-bool myDebugStream = false;
-unsigned long myDebugLastSeen = 0;
-
-void myLoraCommand(char* line);   // LoRa v001, defined below
-void myLoraPrintInfo();
-
-static char myCmdBuf[100];
-static int myCmdLen = -1;                // -1 = not collecting a command line
-static unsigned long myCmdT = 0;
-
-// One hook used by every mode: web page heartbeat (D/d) and @command lines. Returns true when it used the character.
-bool myHandleDebugChar(char c) {
-  if (myCmdLen >= 0 && millis() - myCmdT > 5000) myCmdLen = -1;   // abandoned line
-  if (myCmdLen >= 0) {
-    myCmdT = millis();
-    if (c == '\n' || c == '\r') {
-      myCmdBuf[myCmdLen] = 0;
-      myCmdLen = -1;
-      myLoraCommand(myCmdBuf);
-    } else if (myCmdLen < (int)sizeof(myCmdBuf) - 1) {
-      myCmdBuf[myCmdLen++] = c;
-    }
-    return true;
-  }
-  if (c == '@' || c == '>') { myCmdBuf[0] = c; myCmdLen = 1; myCmdT = millis(); return true; }   // v003: '>' = send a LoRa message
-  if (c == 'D') {
-    if (!myDebugStream) { Serial.println("Debug frames ON"); myLoraPrintInfo(); }
-    myDebugStream = true;
-    myDebugLastSeen = millis();
-    return true;
-  }
-  if (c == 'd') {
-    if (myDebugStream) Serial.println("Debug frames OFF");
-    myDebugStream = false;
-    return true;
-  }
-  return false;
-}
-
-static void myPrintB64(const uint8_t* d, size_t n) {
-  unsigned char out[520];                  // 384 input bytes -> 512 characters + terminator
-  while (n > 0) {
-    size_t take = n > 384 ? 384 : n;       // multiple of 3, so the chunks join into one valid base64 string
-    size_t ol = 0;
-    mbedtls_base64_encode(out, sizeof(out), &ol, d, take);
-    Serial.write(out, ol);
-    d += take;
-    n -= take;
-  }
-}
-
-void myDebugSendFrame(char kind, int n, camera_fb_t* fb, int pred, const float* logits) {
-  if (!myDebugStream || !fb || !Serial) return;
-  if (millis() - myDebugLastSeen > 15000) { myDebugStream = false; return; }   // page stopped sending heartbeats
-  const bool inf = (kind == 'I' && logits != nullptr);
-  Serial.printf("@F %c %d %d ", kind, n, pred);
-  if (inf) {
-    for (int i = 0; i < NUM_CLASSES; i++) { if (i) Serial.print(','); Serial.print(myDense_output[i], 4); }
-    Serial.print(' ');
-    for (int i = 0; i < NUM_CLASSES; i++) { if (i) Serial.print(','); Serial.print(logits[i], 4); }
-  } else {
-    Serial.print("- -");
-  }
-  Serial.printf(" %dx%dx%d ", INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS);
-  if (inf) {
-    int c = ((INPUT_SIZE / 2) * INPUT_SIZE + INPUT_SIZE / 2) * 3;    // centre pixel of the model input
-    Serial.print(myInputBuffer[c], 4); Serial.print(',');
-    Serial.print(myInputBuffer[c + 1], 4); Serial.print(',');
-    Serial.print(myInputBuffer[c + 2], 4);
-  } else {
-    Serial.print('-');
-  }
-  Serial.print(' ');
-  if (inf) {
-    const int hn = CONV2_OUTPUT_SIZE * CONV2_OUTPUT_SIZE;
-    static uint8_t heat[CONV2_OUTPUT_SIZE * CONV2_OUTPUT_SIZE];
-    float lo = 1e30f, hi = -1e30f;
-    for (int i = 0; i < hn; i++) {
-      float m = myConv2_output[i];
-      for (int f = 1; f < CONV2_FILTERS; f++) { float v = myConv2_output[f * hn + i]; if (v > m) m = v; }
-      if (m < lo) lo = m;
-      if (m > hi) hi = m;
-    }
-    float span = hi - lo;
-    if (span < 1e-9f) span = 1.0f;
-    for (int i = 0; i < hn; i++) {
-      float m = myConv2_output[i];
-      for (int f = 1; f < CONV2_FILTERS; f++) { float v = myConv2_output[f * hn + i]; if (v > m) m = v; }
-      heat[i] = (uint8_t)(255.0f * (m - lo) / span + 0.5f);
-    }
-    Serial.printf("%d ", CONV2_OUTPUT_SIZE);
-    myPrintB64(heat, hn);
-  } else {
-    Serial.print("0 -");
-  }
-  Serial.print(' ');
-  myPrintB64(fb->buf, fb->len);
-  Serial.println();
-}
-// ==DBG END==
-
-// ==LORA START==
-// ======================================================
-// LORA v001  (SX1262, same radio settings as lora-p2p-v015: 915 MHz + channel*0.1, SF9, BW125, CR4/7, 22 dBm)
-// Wiring to the XIAO ESP32S3 Sense headers (SPI is shared with the SD card, which uses D8/D9/D10 and CS GPIO21):
-//   SX1262 SCK  -> D8  (GPIO7)     MISO -> D9 (GPIO8)     MOSI -> D10 (GPIO9)
-//   NSS -> D1 (GPIO2)   BUSY -> D3 (GPIO4)   DIO1 -> D6 (GPIO43)   plus 3V3 and GND = 8 wires
-//   RESET is not wired (v002, same as lora-p2p-camera-sdcard-working-v005). If you do wire it, use D2 and set MY_LORA_RST to D2.
-//   SD card chip select is GPIO21 (B2B connector) on the same SPI bus.
-//   Needs "USB CDC On Boot: Enabled" so Serial does not use GPIO43, and Tools -> PSRAM -> OPI PSRAM.
-//   Antenna on the module BEFORE powering.
-// ======================================================
-#define MY_DEFAULT_NAME        "device-a01"   // unique per device; change with @name (saved in flash)
-#define MY_AUTO_START_INFER    1              // 1 = start inference at boot when weights exist
-#define MY_TOUCH_EXIT_IN_INFER 1              // 0 = ignore the A0 touch pad while inferring (headless units)
-#define MY_LORA_SCK   D8                      // GPIO7, shared with the SD card
-#define MY_LORA_MISO  D9                      // GPIO8, shared with the SD card
-#define MY_LORA_MOSI  D10                     // GPIO9, shared with the SD card
-#define MY_LORA_NSS   D1                      // GPIO2
-#define MY_LORA_RST   RADIOLIB_NC             // not wired (v002)
-#define MY_LORA_BUSY  D3                      // GPIO4
-#define MY_LORA_DIO1  D6                      // GPIO43
-#define MY_SD_CS      21                      // SD card chip select on the B2B connector
-#define MY_LORA_RXEN  -1                      // RF switch pins if your module has them (Wio-SX1262 uses RXEN)
-#define MY_LORA_TXEN  -1
-#define MY_LORA_TCXO_V 1.8f                   // 0 for a module without a TCXO
-#define MY_LORA_DIO2_RF true
-#define MY_LORA_MAX   100
-
-SX1262 myRadio = new Module(MY_LORA_NSS, MY_LORA_DIO1, MY_LORA_RST, MY_LORA_BUSY);
-Preferences myPrefs;
-volatile bool myLoraFlag = false;
-bool myLoraOk = false, myLoraTxBusy = false;
-unsigned long myLoraTxStart = 0;
-char myLoraName[24] = MY_DEFAULT_NAME;
-int myLoraChannel = 0;
-bool myLoraEncrypt = false;
-char myLoraSeed[32] = "maker100";
-int myLoraReportSec = 30;
-int myLoraMinConf = 60;
-unsigned long myLoraSeq = 0, myLoraTxN = 0, myLoraRxN = 0, myLoraErrN = 0;
-uint16_t myLoraCounts[NUM_CLASSES];
-uint32_t myLoraFrames = 0;
-unsigned long myLoraWinStart = 0, myLoraNext = 0, myLoraInfoLast = 0;
-
-void IRAM_ATTR myLoraIsr() { myLoraFlag = true; }
-
-float myLoraFreq() { return 915.0f + myLoraChannel * 0.1f; }
-
-// Printable-ASCII Vigenere cipher from lora-p2p-v015: hides text from casual listeners, it is NOT strong security.
-void myLoraCipher(char* b, bool enc) {
-  int sl = strlen(myLoraSeed);
-  if (sl == 0) return;
-  for (int i = 0; b[i]; i++) {
-    char c = b[i];
-    if (c >= 32 && c <= 126) {
-      int sh = myLoraSeed[i % sl] % 95;
-      if (!enc) sh = -sh;
-      b[i] = 32 + (c - 32 + sh + 95) % 95;
-    }
-  }
-}
-
-void myLoraSave() {
-  myPrefs.begin("lora", false);
-  myPrefs.putString("name", myLoraName);
-  myPrefs.putInt("ch", myLoraChannel);
-  myPrefs.putBool("enc", myLoraEncrypt);
-  myPrefs.putString("seed", myLoraSeed);
-  myPrefs.putInt("rep", myLoraReportSec);
-  myPrefs.putInt("conf", myLoraMinConf);
-  myPrefs.end();
-}
-
-void myLoraLoad() {
-  myPrefs.begin("lora", false);
-  myPrefs.getString("name", MY_DEFAULT_NAME).toCharArray(myLoraName, sizeof(myLoraName));
-  myLoraChannel   = myPrefs.getInt("ch", 0);
-  myLoraEncrypt   = myPrefs.getBool("enc", false);
-  myPrefs.getString("seed", "maker100").toCharArray(myLoraSeed, sizeof(myLoraSeed));
-  myLoraReportSec = myPrefs.getInt("rep", 30);
-  myLoraMinConf   = myPrefs.getInt("conf", 60);
-  myPrefs.end();
-}
-
-void myLoraPrintInfo() {
-  myLoraInfoLast = millis();
-  Serial.printf("@LORA-INFO name=%s ch=%d report=%d conf=%d radio=%s classes=", myLoraName, myLoraChannel,
-                myLoraReportSec, myLoraMinConf, myLoraOk ? "ok" : "off");
-  for (int i = 0; i < NUM_CLASSES; i++) { if (i) Serial.print(','); Serial.print(myClassLabels[i]); }
-  Serial.println();
-}
-
-void myLoraBegin() {
-  myLoraLoad();
-  Serial.print(F("[SX1262] init ... "));
-  int st = myRadio.begin(myLoraFreq(), 125.0, 9, 7, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 22, 8, MY_LORA_TCXO_V);
-  if (st != RADIOLIB_ERR_NONE) {
-    Serial.printf("failed, code %d. LoRa is OFF (check wiring). Summaries are still printed for the web page.\n", st);
-  } else {
-    myRadio.setDio2AsRfSwitch(MY_LORA_DIO2_RF);
-#if MY_LORA_RXEN >= 0 || MY_LORA_TXEN >= 0
-    myRadio.setRfSwitchPins(MY_LORA_RXEN, MY_LORA_TXEN);
-#endif
-    myRadio.setSyncWord(0x3444);
-    myRadio.setDio1Action(myLoraIsr);
-    myLoraOk = (myRadio.startReceive() == RADIOLIB_ERR_NONE);
-    Serial.println(myLoraOk ? F("ready") : F("receive failed"));
-  }
-  myLoraWinStart = millis();
-  myLoraNext = millis() + 5000 + random(myLoraReportSec * 1000L);   // random first report so devices do not collide
-  myLoraPrintInfo();
-}
-
-// Called from the inference loop for every frame.
-void myLoraCount(int pred, float p) {
-  myLoraFrames++;
-  if (pred >= 0 && pred < NUM_CLASSES && p * 100.0f >= myLoraMinConf) myLoraCounts[pred]++;
-}
-
-// ---- v003: time stamps, readable packet descriptions, last messages for the OLED ----
-long myLoraClockBase = -1;            // -1 = no clock set: stamps show time since boot; else seconds-of-day minus uptime
-char myLoraLastTx[40] = "", myLoraLastRx[40] = "";   // "<stamp> <text>" of the last message, for the OLED
-
-void myLoraStamp(char* out, size_t n) {
-  unsigned long s = millis() / 1000UL;
-  if (myLoraClockBase >= 0) {
-    s = (s + (unsigned long)myLoraClockBase) % 86400UL;
-    snprintf(out, n, "%02lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
-  } else {
-    snprintf(out, n, "T+%02lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
-  }
-}
-
-// Turns a summary packet  S,<name>,<seq>,<period>,<frames>,<c0>,<c1>,...  into words, e.g.
-//   summary #5: 30 s window, 215 frames -> 0Blank 67, 1Cup 120, 2Pen 0, unsure 28
-// The sender name goes into 'name'. Returns false when the packet is not a summary.
-bool myLoraExplain(const char* pkt, char* name, size_t nn, char* out, size_t n) {
-  if (pkt[0] != 'S' || pkt[1] != ',') return false;
-  char tmp[MY_LORA_MAX + 40];
-  strncpy(tmp, pkt, sizeof(tmp) - 1); tmp[sizeof(tmp) - 1] = 0;
-  char* sp;
-  strtok_r(tmp, ",", &sp);                              // "S"
-  char* nm  = strtok_r(NULL, ",", &sp);
-  char* seq = strtok_r(NULL, ",", &sp);
-  char* per = strtok_r(NULL, ",", &sp);
-  char* frm = strtok_r(NULL, ",", &sp);
-  if (!nm || !seq || !per || !frm) return false;
-  strncpy(name, nm, nn - 1); name[nn - 1] = 0;
-  long frames = atol(frm), sum = 0;
-  int len = snprintf(out, n, "summary #%s: %s s window, %s frames ->", seq, per, frm);
-  int i = 0;
-  for (char* c = strtok_r(NULL, ",", &sp); c && len < (int)n - 24; c = strtok_r(NULL, ",", &sp), i++) {
-    long v = atol(c);
-    sum += v;
-    if (i < NUM_CLASSES) len += snprintf(out + len, n - len, "%s %s %ld", i ? "," : "", myClassLabels[i].c_str(), v);
-    else                 len += snprintf(out + len, n - len, "%s class%d %ld", i ? "," : "", i, v);
-  }
-  if (frames > sum && len < (int)n - 24) snprintf(out + len, n - len, ", unsure %ld", frames - sum);
-  return true;
-}
-
-// Sends one packet and prints what was sent and when. Returns true when the radio accepted it.
-bool myLoraTransmit(char* pkt) {
-  char st[16]; myLoraStamp(st, sizeof(st));
-  int len = strlen(pkt);
-  if (!myLoraOk)    { Serial.printf("[%s] NOT SENT, the LoRa radio is off (check wiring): %s\n", st, pkt); return false; }
-  if (myLoraTxBusy) { Serial.printf("[%s] NOT SENT, the radio is still busy, try again: %s\n", st, pkt); return false; }
-  unsigned long air = (unsigned long)(myRadio.getTimeOnAir(len) / 1000);
-  char nm[24], ex[200];
-  const char* enc = myLoraEncrypt ? ", encrypted" : "";
-  if (myLoraExplain(pkt, nm, sizeof(nm), ex, sizeof(ex)))
-    Serial.printf("[%s] TX %s  (%d bytes, ~%lu ms on air%s)\n", st, ex, len, air, enc);
-  else
-    Serial.printf("[%s] TX message: \"%s\"  (%d bytes, ~%lu ms on air%s)\n", st, pkt, len, air, enc);
-  snprintf(myLoraLastTx, sizeof(myLoraLastTx), "%s %s", st, pkt);
-  if (myLoraEncrypt) myLoraCipher(pkt, true);
-  digitalWrite(MY_SD_CS, HIGH);   // v002: SD card deselected before LoRa SPI activity
-  myRadio.standby();
-  if (myRadio.startTransmit(pkt) == RADIOLIB_ERR_NONE) { myLoraTxBusy = true; myLoraTxStart = millis(); myLoraTxN++; return true; }
-  myLoraErrN++; myRadio.startReceive();
-  Serial.printf("[%s] TX FAILED, the radio did not start sending\n", st);
-  return false;
-}
-
-// Chat line: "<name>: <text>"
-bool myLoraSendText(const char* text) {
-  while (*text == ' ') text++;
-  if (!*text) { Serial.println(F("[E] nothing to send. Type some text after the command")); return false; }
-  char pkt[MY_LORA_MAX + 1];
-  int need = snprintf(pkt, sizeof(pkt), "%s: %s", myLoraName, text);
-  if (need >= (int)sizeof(pkt)) Serial.printf("[note] message cut to %d characters (the limit includes \"%s: \")\n", (int)sizeof(pkt) - 1, myLoraName);
-  return myLoraTransmit(pkt);
-}
-
-void myLoraReport() {
-  unsigned long now = millis();
-  unsigned long period = (now - myLoraWinStart + 500) / 1000;
-  myLoraNext = now + (unsigned long)myLoraReportSec * 10UL * (90 + random(21));   // 90..110 % of the period
-  if (myLoraFrames == 0) { myLoraWinStart = now; return; }                       // not inferring: nothing to say
-  char pkt[MY_LORA_MAX];
-  int n = snprintf(pkt, sizeof(pkt), "S,%s,%lu,%lu,%lu", myLoraName, myLoraSeq, period, (unsigned long)myLoraFrames);
-  for (int i = 0; i < NUM_CLASSES && n < (int)sizeof(pkt) - 8; i++) n += snprintf(pkt + n, sizeof(pkt) - n, ",%u", myLoraCounts[i]);
-  Serial.printf("@LORA self 0 %s\n", pkt);
-  if (myLoraOk) myLoraTransmit(pkt);   // v003: prints a time-stamped explanation of what was sent
-  myLoraSeq++;
-  memset(myLoraCounts, 0, sizeof(myLoraCounts));
-  myLoraFrames = 0;
-  myLoraWinStart = now;
-}
-
-void myLoraService() {
-  unsigned long now = millis();
-  if (myLoraOk && myLoraFlag) {
-    myLoraFlag = false;
-    if (myLoraTxBusy) {
-      myLoraTxBusy = false;
-      myRadio.startReceive();
-    } else {
-      String s;
-      int st = myRadio.readData(s);
-      if (st == RADIOLIB_ERR_NONE) {
-        myLoraRxN++;
-        char b[MY_LORA_MAX + 40];
-        s.toCharArray(b, sizeof(b));
-        if (myLoraEncrypt) myLoraCipher(b, false);
-        int rssi = (int)myRadio.getRSSI(); float snr = myRadio.getSNR();
-        char stp[16], nm[24], ex[200];
-        myLoraStamp(stp, sizeof(stp));
-        if (b[0] == 'S' && b[1] == ',') {
-          Serial.printf("@LORA %d %.1f %s\n", rssi, snr, b);   // machine line for the web page (unchanged)
-          if (myLoraExplain(b, nm, sizeof(nm), ex, sizeof(ex))) Serial.printf("[%s] RX from %s (%d dBm, SNR %.1f): %s\n", stp, nm, rssi, snr, ex);
-        } else {
-          Serial.printf("[%s] RX message (%d dBm, SNR %.1f): %s\n", stp, rssi, snr, b);
-          snprintf(myLoraLastRx, sizeof(myLoraLastRx), "%s %s", stp, b);
+  if (mask) for (let i = 0; i < FLAT; i++) dg[i] *= mask[i];
+  const c1o = a.c1o, p1o = a.p1o, c2o = a.c2o, c2g = a.c2g, p1g = a.p1g, c1g = a.c1g;
+  for (let i = 0; i < FLAT; i++) c2g[i] = dg[i] * lrd(c2o[i]);
+  p1g.fill(0);
+  for (let f = 0; f < C2F; f++) {
+    const o = f * C2O * C2O;
+    for (let y = 0; y < C2O; y++) for (let xx = 0; xx < C2O; xx++) {
+      const gr = c2g[o + y * C2O + xx]; g.c2b[f] += gr;
+      for (let c = 0; c < C1F; c++) {
+        const ib = c * P1O * P1O;
+        for (let ky = 0; ky < 3; ky++) for (let kx = 0; kx < 3; kx++) {
+          const pi = ib + (y + ky) * P1O + (xx + kx), wi = f * 9 * C1F + c * 9 + ky * 3 + kx;
+          g.c2w[wi] += gr * p1o[pi]; p1g[pi] += gr * w.c2w[wi];
         }
-      } else if (st != RADIOLIB_ERR_RX_TIMEOUT) {
-        myLoraErrN++;
-        Serial.printf("[E] LoRa read error %d\n", st);
       }
-      myRadio.startReceive();
     }
   }
-  if (myLoraTxBusy && now - myLoraTxStart > 3000) { myLoraTxBusy = false; myLoraErrN++; myRadio.startReceive(); }
-  if (!myLoraTxBusy && (long)(now - myLoraNext) >= 0) myLoraReport();
-  if (myDebugStream && now - myLoraInfoLast > 30000) myLoraPrintInfo();
-}
-
-void myLoraHelp() {
-  Serial.println(F("\n--- Commands (type, then Enter) ---"));
-  Serial.println(F("  @name <n>     set this device name, e.g. @name device-a02 (letters, digits, - _)"));
-  Serial.println(F("  @<num>        radio channel, 915.0 MHz + num*0.1 (all devices must match)"));
-  Serial.println(F("  @report <s>   seconds between summaries (5..3600, default 30)"));
-  Serial.println(F("  @conf <pct>   minimum confidence to count a frame (0..100, default 60)"));
-  Serial.println(F("  @encrypt on|off   @seed <text>"));
-  Serial.println(F("  >text  or  @say text   send a chat message over LoRa (works in every mode)"));
-  Serial.println(F("  @time hh:mm[:ss]   set the clock used in the [time] stamps (lost at reboot; default is time since boot)"));
-  Serial.println(F("  @info   @stats   @help"));
-  Serial.println(F("  Menu item \"LoRa msg\": everything you type + Enter is sent as a message, /exit leaves"));
-}
-
-void myLoraCommand(char* l) {
-  if (!strcasecmp(l, "@help") || !strcmp(l, "@?")) { myLoraHelp(); return; }
-  if (!strcasecmp(l, "@info")) { myLoraPrintInfo(); return; }
-  if (!strcasecmp(l, "@stats")) {
-    Serial.printf("[stats] name %s ch %d (%.1f MHz) radio %s enc %s | tx %lu rx %lu err %lu | report %ds conf %d%% seq %lu\n",
-                  myLoraName, myLoraChannel, myLoraFreq(), myLoraOk ? "ok" : "off", myLoraEncrypt ? "on" : "off",
-                  myLoraTxN, myLoraRxN, myLoraErrN, myLoraReportSec, myLoraMinConf, myLoraSeq);
-    return;
-  }
-  if (!strncasecmp(l, "@name ", 6)) {
-    char* p = l + 6; while (*p == ' ') p++;
-    int n = 0;
-    for (; p[n] && n < (int)sizeof(myLoraName) - 1; n++) {
-      char c = p[n];
-      myLoraName[n] = (isalnum((unsigned char)c) || c == '-' || c == '_') ? c : '-';
-    }
-    myLoraName[n] = 0;
-    if (n == 0) strcpy(myLoraName, MY_DEFAULT_NAME);
-    myLoraSave(); Serial.printf("[OK] name = %s (saved)\n", myLoraName); myLoraPrintInfo(); return;
-  }
-  if (!strncasecmp(l, "@report ", 8)) {
-    int v = atoi(l + 8);
-    if (v < 5 || v > 3600) { Serial.println(F("[E] report must be 5..3600 seconds")); return; }
-    myLoraReportSec = v; myLoraSave(); myLoraNext = millis() + v * 1000UL;
-    Serial.printf("[OK] report every %d s (saved)\n", v); myLoraPrintInfo(); return;
-  }
-  if (!strncasecmp(l, "@conf ", 6)) {
-    int v = atoi(l + 6);
-    if (v < 0 || v > 100) { Serial.println(F("[E] conf must be 0..100")); return; }
-    myLoraMinConf = v; myLoraSave(); Serial.printf("[OK] min confidence %d%% (saved)\n", v); myLoraPrintInfo(); return;
-  }
-  if (!strncasecmp(l, "@seed ", 6)) {
-    strncpy(myLoraSeed, l + 6, sizeof(myLoraSeed) - 1); myLoraSeed[sizeof(myLoraSeed) - 1] = 0;
-    myLoraSave(); Serial.println(F("[OK] seed updated (saved)")); return;
-  }
-  if (!strcasecmp(l, "@encrypt on") || !strcasecmp(l, "@encrypt off")) {
-    myLoraEncrypt = (l[10] == 'n' || l[10] == 'N'); myLoraSave();
-    Serial.println(myLoraEncrypt ? F("[OK] encryption ON (saved)") : F("[OK] encryption OFF (saved)")); return;
-  }
-  if (l[0] == '>') { myLoraSendText(l + 1); return; }                        // v003:  >hello
-  if (!strncasecmp(l, "@say ", 5)) { myLoraSendText(l + 5); return; }
-  if (!strncasecmp(l, "@time", 5)) {
-    int h, m, sec = 0;
-    if (l[5] == 0) { char st[16]; myLoraStamp(st, sizeof(st)); Serial.printf("[%s] now\n", st); return; }
-    int got = sscanf(l + 5, "%d:%d:%d", &h, &m, &sec);
-    if (got < 2 || h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) { Serial.println(F("[E] use  @time hh:mm  or  @time hh:mm:ss  (24 hour clock)")); return; }
-    long tod = h * 3600L + m * 60L + sec;
-    myLoraClockBase = (tod + 86400L - (long)((millis() / 1000UL) % 86400UL)) % 86400L;
-    Serial.println(F("[OK] clock set, [time] stamps now show the time of day (not saved, lost at reboot)")); return;
-  }
-  char* e;
-  long ch = strtol(l + 1, &e, 10);
-  if (*e == 0 && e != l + 1 && ch >= 0 && ch <= 120) {
-    myLoraChannel = (int)ch; myLoraSave();
-    if (myLoraOk) { myRadio.standby(); int st = myRadio.setFrequency(myLoraFreq()); myRadio.startReceive();
-      Serial.printf(st == RADIOLIB_ERR_NONE ? "[OK] channel %d (%.1f MHz, saved)\n" : "[E] frequency change failed (%d)\n", st == RADIOLIB_ERR_NONE ? (int)ch : st, myLoraFreq()); }
-    myLoraPrintInfo(); return;
-  }
-  Serial.println(F("[E] Unknown command. Type @help"));
-}
-// ==LORA END==
-
-
-void mySaveWeights() {
-  if (!mySDavailable) {
-    Serial.println("No SD card - cannot save weights");
-    return;
-  }
-  if (!SD.exists("/header")) SD.mkdir("/header");
-  File f = SD.open("/header/myWeights.bin", FILE_WRITE);
-  if (f) {
-    f.write((uint8_t*)myConv1_w, CONV1_WEIGHTS*4); 
-    f.write((uint8_t*)myConv1_b, CONV1_FILTERS*4);
-    f.write((uint8_t*)myConv2_w, CONV2_WEIGHTS*4); 
-    f.write((uint8_t*)myConv2_b, CONV2_FILTERS*4);
-    f.write((uint8_t*)myOutput_w, OUTPUT_WEIGHTS*4); 
-    f.write((uint8_t*)myOutput_b, NUM_CLASSES*4);
-    f.close();
-    Serial.println("Weights saved to SD");
-  }
-  myExportHeader();
-}
-
-// ======================================================
-// IMAGE LOADING FROM SD
-// ======================================================
-bool myLoadImageFromFile(const char* path, float* buf) {
-  File f = SD.open(path);
-  if(!f) return false;
-  
-  size_t sz = f.size();
-  uint8_t* jpg = (uint8_t*)ps_malloc(sz);
-  if(!jpg) { f.close(); return false; }
-  f.read(jpg, sz);
-  f.close();
-  
-  // v43 FIX 3: Use the pre-allocated global myRgbBuffer instead of allocating
-  // 172KB of PSRAM on every single image load. The old code did ps_malloc(240*240*3)
-  // here which was slow, fragmented PSRAM, and is why touch/serial felt unresponsive.
-  if(!myRgbBuffer) { free(jpg); return false; }
-  
-  bool ok = fmt2rgb888(jpg, sz, PIXFORMAT_JPEG, myRgbBuffer);
-  free(jpg);
-  if(!ok) return false;
-  
-  for(int y=0; y<INPUT_SIZE; y++) {
-    for(int x=0; x<INPUT_SIZE; x++) {
-      int sy = (int)((y+0.5)*240.0/INPUT_SIZE);
-      int sx = (int)((x+0.5)*240.0/INPUT_SIZE);
-      if(sy>239) sy=239;
-      if(sx>239) sx=239;
-      int srcIdx = (sy*240 + sx)*3;
-      int dstIdx = (y*INPUT_SIZE + x)*3;
-      buf[dstIdx]   = myRgbBuffer[srcIdx]   / 255.0f;
-      buf[dstIdx+1] = myRgbBuffer[srcIdx+1] / 255.0f;
-      buf[dstIdx+2] = myRgbBuffer[srcIdx+2] / 255.0f;
+  c1g.fill(0);
+  for (let f = 0; f < C1F; f++) {
+    const ib = f * C1O * C1O, o = f * P1O * P1O;
+    for (let y = 0; y < P1O; y++) for (let xx = 0; xx < P1O; xx++) {
+      const pv = p1o[o + y * P1O + xx], gr = p1g[o + y * P1O + xx];
+      const i0 = ib + y * 2 * C1O + xx * 2, i2 = i0 + C1O;
+      if (c1o[i0] === pv) c1g[i0] += gr;
+      if (c1o[i0 + 1] === pv) c1g[i0 + 1] += gr;
+      if (c1o[i2] === pv) c1g[i2] += gr;
+      if (c1o[i2 + 1] === pv) c1g[i2 + 1] += gr;
     }
   }
-  return true;
-}
-
-// ======================================================
-// PART 0: SETUP AND LOOP
-// ======================================================
-
-// Forward declarations for functions defined in other parts
-void myActionCollect(int classIdx);
-void myActionTrain();
-void myActionInfer();
-void myActionLoraChat();   // v003
-void myResetMenuState();
-void myHandleMenuNavigation();
-void myDrawMenu();
-
-void setup() {
-  Serial.begin(115200);
-  while (!Serial && millis() < 3000); 
-  delay(1000);  // slow down the startup
-  
-  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (v47 + LoRa v003) ===");
-  Serial.printf("Layout: INPUT_SIZE %d, CONV1_FILTERS %d, CONV2_FILTERS %d, NUM_CLASSES %d\n",
-                INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS, NUM_CLASSES);
-  Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
-  Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
-  
-// Add in setup() function:
-myRgbBuffer = (uint8_t*)ps_malloc(240*240*3);
-if (!myRgbBuffer) {
-  Serial.println("Failed to allocate RGB buffer!");
-}
-
-  pinMode(A0, INPUT);
-  u8g2.begin();
-  
-// Manual SPI init with timeout to prevent hang when no SD card present
-  pinMode(MY_SD_CS, OUTPUT);
-  digitalWrite(MY_SD_CS, HIGH);
-  delay(100);
-
-  pinMode(MY_LORA_NSS, OUTPUT); digitalWrite(MY_LORA_NSS, HIGH);   // LoRa chip stays quiet while the SD card starts
-  Serial.println("Checking SD card...");
-  // v002: shared SPI bus with explicit pins and NO hardware SS (as in lora-p2p-camera-sdcard-working-v005)
-  SPI.begin(MY_LORA_SCK, MY_LORA_MISO, MY_LORA_MOSI, -1);
-  
-  mySDavailable = SD.begin(MY_SD_CS, SPI, 400000, "/sd", 5, false);
-  
-  if (!mySDavailable) {
-      SD.end();   // instead of SPI.end()
-    Serial.println("No SD card - continuing without it");
-    u8g2.firstPage();
-    do { u8g2.drawStr(0, 15, "No SD card"); } while (u8g2.nextPage());
-    delay(2000);
-  } else {
-    Serial.println("SD card mounted successfully");
-    myLoadConfig();   // v46: class labels from /header/config.json
-  }
-
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM; config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM; config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM; config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM; config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM; config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM; config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM; config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM; config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000; config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_240X240; config.jpeg_quality = 12;
-  config.fb_count = 1;     // 2
-  esp_err_t camErr = esp_camera_init(&config);
-  if (camErr != ESP_OK) {
-    Serial.printf("Camera init FAILED: 0x%x\n", camErr);
-  } else {
-    Serial.println("Camera initialized");
-  }
-  sensor_t * s = esp_camera_sensor_get();
-    if (s != NULL) {
-      // v45: mirrored + flipped vertically to match the web trainer page, and brighter
-      s->set_hmirror(s, MY_CAM_HMIRROR);
-      s->set_vflip(s, MY_CAM_VFLIP);
-      s->set_brightness(s, MY_CAM_BRIGHTNESS);   // -2..2
-      s->set_ae_level(s, MY_CAM_AE_LEVEL);       // -2..2
+  for (let i = 0; i < C1F * C1O * C1O; i++) c1g[i] *= lrd(c1o[i]);
+  for (let f = 0; f < C1F; f++) {
+    const o = f * C1O * C1O;
+    for (let y = 0; y < C1O; y++) for (let xx = 0; xx < C1O; xx++) {
+      const gr = c1g[o + y * C1O + xx]; g.c1b[f] += gr;
+      for (let ky = 0; ky < 3; ky++) for (let kx = 0; kx < 3; kx++) {
+        const ip = ((y + ky) * IN + (xx + kx)) * 3, wp = f * 27 + ky * 9 + kx * 3;
+        g.c1w[wp] += gr * inp[ip]; g.c1w[wp + 1] += gr * inp[ip + 1]; g.c1w[wp + 2] += gr * inp[ip + 2];
+      }
     }
-
-  // v45: throw away the first few frames so auto exposure settles before any image is used
-  for (int i = 0; i < MY_CAM_WARMUP_FRAMES; i++) {
-    camera_fb_t* warm = esp_camera_fb_get();
-    if (warm) esp_camera_fb_return(warm);
-    delay(60);
   }
-
-  // ESP-IDF Log Levels (ordered least to most verbose):
-  //   ESP_LOG_NONE    (0) — no output at all
-  //   ESP_LOG_WARN    (2) — errors + W(...) warnings
-  //   ESP_LOG_VERBOSE (5) — + V(...) everything
-
-  // Set globally first, then override specific tags as needed:
-  esp_log_level_set("*", ESP_LOG_WARN);           // suppress INFO spam globally
-  esp_log_level_set("esp_camera", ESP_LOG_ERROR); // suppress FB_OVF (WARN level)
-
-  myAllocateMemory();  // allocates PSRAM and sets random He-init weights
-
-  // v002: SD card and camera init can leave the SPI pins changed, so set the shared bus up again and keep
-  // both chip selects HIGH before the radio starts (as in lora-p2p-camera-sdcard-working-v005)
-  SPI.begin(MY_LORA_SCK, MY_LORA_MISO, MY_LORA_MOSI, -1);
-  digitalWrite(MY_SD_CS, HIGH);
-  digitalWrite(MY_LORA_NSS, HIGH);
-  myLoraBegin();       // LoRa v002
-
-#ifdef USE_BAKED_WEIGHTS
-  memcpy(myConv1_w,  myModel_conv1_w,  CONV1_WEIGHTS  * sizeof(float));
-  memcpy(myConv1_b,  myModel_conv1_b,  CONV1_FILTERS  * sizeof(float));
-  memcpy(myConv2_w,  myModel_conv2_w,  CONV2_WEIGHTS  * sizeof(float));
-  memcpy(myConv2_b,  myModel_conv2_b,  CONV2_FILTERS  * sizeof(float));
-  memcpy(myOutput_w, myModel_output_w, OUTPUT_WEIGHTS * sizeof(float));
-  memcpy(myOutput_b, myModel_output_b, NUM_CLASSES    * sizeof(float));
-  Serial.println("Baked-in weights loaded from myModel.h");
-  myWeightsTrained = true; 
-#endif
-
-  if (myLoadWeights()) {
-    Serial.println("SD weights loaded - overriding baked-in weights");
-  }
-
-
-  myLastActivityTime = millis();
-  myResetMenuState();
-  delay(2000);  // time to get things started like the serial monitor
-
-  Serial.println("System ready - Tap A0 to navigate, 3+ taps to select");
-  myDrawMenu();
-
 }
 
-void loop() {
-  static bool myBootAuto = true;
-  myLoraService();
-  if (myBootAuto) {
-    myBootAuto = false;
-    if (MY_AUTO_START_INFER && myWeightsTrained) {
-      Serial.println("Auto-start inference (set MY_AUTO_START_INFER 0 to keep the menu)");
-      myIsSelected = true;
-      myActionInfer();
+// Adam exactly as myAdamUpdate(): b1 .9, b2 .999, eps 1e-6, weights clipped to +-10.
+// Browser safety additions: non-finite gradients count as 0, and each single update is bounded by maxStep.
+function adamUpdate(wt, gr, m, v, step, lr, maxStep) {
+  const b1 = 0.9, b2 = 0.999, eps = 1e-6;
+  const lrt = lr * Math.sqrt(1 - Math.pow(b2, step)) / (1 - Math.pow(b1, step));
+  for (let i = 0; i < wt.length; i++) {
+    let gi = gr[i]; if (!Number.isFinite(gi)) gi = 0;
+    m[i] = b1 * m[i] + (1 - b1) * gi;
+    v[i] = b2 * v[i] + (1 - b2) * gi * gi;
+    let d = lrt * m[i] / (Math.sqrt(v[i]) + eps);
+    if (!Number.isFinite(d)) d = 0;
+    if (d > maxStep) d = maxStep; else if (d < -maxStep) d = -maxStep;
+    wt[i] = clipv(wt[i] - d, -10, 10);
+  }
+}
+function updateWeights(net, step, lr, maxStep) { for (const k of PARAM_ORDER) adamUpdate(net.w[k], net.g[k], net.m[k], net.v[k], step, lr, maxStep); }
+function zeroGrad(net) { for (const k of PARAM_ORDER) net.g[k].fill(0); }
+
+function argmax(p) { let b = 0; for (let i = 1; i < p.length; i++) if (p[i] > p[b]) b = i; return b; }
+function weightsFinite(net) { for (const k of PARAM_ORDER) { const a = net.w[k]; for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[i])) return false; } return true; }
+
+function serializeWeights(net) {
+  const buf = new ArrayBuffer(totalFloats(net.N) * 4), dv = new DataView(buf); let o = 0;
+  for (const k of PARAM_ORDER) { const a = net.w[k]; for (let i = 0; i < a.length; i++, o += 4) dv.setFloat32(o, a[i], true); }
+  return buf;
+}
+function parseWeights(net, buf) {
+  const dv = new DataView(buf); let o = 0;
+  for (const k of PARAM_ORDER) { const a = net.w[k]; for (let i = 0; i < a.length; i++, o += 4) a[i] = dv.getFloat32(o, true); }
+}
+
+// RGBA (240x240) -> HWC RGB floats 0..1 with the firmware's nearest-pixel sampling.
+function rgbaToInput(d) {
+  const out = new Float32Array(IN * IN * 3);
+  for (let y = 0; y < IN; y++) for (let x = 0; x < IN; x++) {
+    const si = (LUT[y] * SRC + LUT[x]) * 4, di = (y * IN + x) * 3;
+    out[di] = d[si] / 255; out[di + 1] = d[si + 1] / 255; out[di + 2] = d[si + 2] / 255;
+  }
+  return out;
+}
+
+// Browser-only augmentation: horizontal flip and brightness jitter.
+function augment(x) {
+  const o = new Float32Array(x.length), flip = Math.random() < 0.5, k = 0.8 + Math.random() * 0.4;
+  for (let y = 0; y < IN; y++) for (let xx = 0; xx < IN; xx++) {
+    const si = (y * IN + (flip ? IN - 1 - xx : xx)) * 3, di = (y * IN + xx) * 3;
+    for (let c = 0; c < 3; c++) o[di + c] = Math.min(1, x[si + c] * k);
+  }
+  return o;
+}
+
+// Train/validation split. items: [{cls, path, ref}]. 'fw' mirrors the firmware: sort by path, hold out the
+// LAST N per class. 'pct': last k per class where k = pct of the smallest class (always leaves 1 to train).
+function splitData(items, N, mode, param) {
+  const sorted = items.slice().sort((a, b) => a.path < b.path ? -1 : (a.path > b.path ? 1 : 0));
+  const counts = new Array(N).fill(0); for (const it of sorted) counts[it.cls]++;
+  let skip;
+  if (mode === 'fw') skip = counts.map(c => Math.min(param, c));
+  else {
+    const present = counts.filter(c => c > 0), mn = present.length ? Math.min(...present) : 0;
+    const k = Math.round(param / 100 * mn);
+    skip = counts.map(c => Math.max(0, Math.min(k, c - 1)));
+  }
+  const train = [], val = [], seen = new Array(N).fill(0);
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const c = sorted[i].cls;
+    if (seen[c] < skip[c]) { val.push(sorted[i].ref); seen[c]++; } else train.push(sorted[i].ref);
+  }
+  return { train, val };
+}
+
+function copyObj(o) { const r = {}; for (const k of PARAM_ORDER) r[k] = o[k].slice(); return r; }
+function takeSnap(net, step) { return { w: copyObj(net.w), m: copyObj(net.m), v: copyObj(net.v), step }; }
+function restoreSnap(net, s) { for (const k of PARAM_ORDER) { net.w[k].set(s.w[k]); net.m[k].set(s.m[k]); net.v[k].set(s.v[k]); } }
+
+// Training driver. o: {lr,batch,epochs,dropout,augment,maxStep}. h: hooks {input(s), onBatch, onEpoch, onLog, stopped(), paused()}.
+// Samples must have .cls and be already decoded (h.input returns a Float32Array). Rolls back and halves lr on a non-finite loss.
+async function runTraining(net, tr, val, o, h) {
+  const total = tr.length, B = o.batch, bpe = Math.ceil(total / B);
+  let lr = o.lr, step = 0, rollbacks = 0, epoch = 1, snap = takeSnap(net, 0);
+  const mask = o.dropout > 0 ? new Float32Array(FLAT) : null;
+  const idx = Array.from({ length: total }, (_, i) => i);
+  while (epoch <= o.epochs) {
+    for (let i = total - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = idx[i]; idx[i] = idx[j]; idx[j] = t; }
+    let eLoss = 0, eOk = 0, eN = 0, bad = false;
+    for (let b = 0; b < bpe; b++) {
+      while (h.paused() && !h.stopped()) await sleep(80);
+      if (h.stopped()) return { stopped: true, epoch };
+      zeroGrad(net);
+      const s0 = b * B, s1 = Math.min(s0 + B, total); let bl = 0, ok = 0;
+      for (let i = s0; i < s1; i++) {
+        const smp = tr[idx[i]]; let x = h.input(smp); if (o.augment) x = augment(x);
+        if (mask) { const keep = 1 - o.dropout; for (let k = 0; k < FLAT; k++) mask[k] = Math.random() < keep ? 1 / keep : 0; }
+        forward(net, x, mask);
+        bl += -Math.log(Math.max(net.a.probs[smp.cls], 1e-7));
+        if (argmax(net.a.probs) === smp.cls) ok++;
+        backward(net, x, smp.cls, mask);
+      }
+      const n = s1 - s0, avg = bl / n; step++;
+      if (!Number.isFinite(avg)) { bad = true; break; }
+      updateWeights(net, step, lr, o.maxStep);
+      eLoss += bl; eOk += ok; eN += n;
+      if (h.onBatch) h.onBatch({ epoch, b: b + 1, bpe, loss: avg, acc: ok / n, lr });
+      await tick();
+    }
+    if (bad || !weightsFinite(net)) {
+      restoreSnap(net, snap); step = snap.step; lr /= 2; rollbacks++;
+      h.onLog('Non-finite loss in epoch ' + epoch + '. Rolled back to the last good epoch and halved the learning rate to ' + lr + '.');
+      if (rollbacks > 5) { h.onLog('Too many rollbacks. Training stopped. Lower the learning rate and try again.'); return { failed: true, epoch }; }
+      continue;
+    }
+    let vOk = 0;
+    for (const s of val) { forward(net, h.input(s)); if (argmax(net.a.probs) === s.cls) vOk++; }
+    snap = takeSnap(net, step);
+    h.onEpoch({ epoch, loss: eLoss / eN, tacc: eOk / eN, vacc: val.length ? vOk / val.length : null, lr });
+    epoch++;
+  }
+  return { done: true };
+}
+
+// ---- Zip (STORE writer; STORE and DEFLATE reader) ----
+const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(u8) { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = CRC[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+function makeZip(files) { // files: [{name, data:Uint8Array}] ; a name ending in '/' is a folder entry
+  const enc = new TextEncoder(), parts = [], cen = []; let off = 0;
+  const d = new Date(), dt = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const dd = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  for (const f of files) {
+    const nm = enc.encode(f.name), data = f.data, crc = crc32(data), sz = data.length;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, dt, true); lh.setUint16(12, dd, true); lh.setUint32(14, crc, true); lh.setUint32(18, sz, true); lh.setUint32(22, sz, true);
+    lh.setUint16(26, nm.length, true); lh.setUint16(28, 0, true);
+    parts.push(lh.buffer, nm, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true);
+    ch.setUint16(12, dt, true); ch.setUint16(14, dd, true); ch.setUint32(16, crc, true); ch.setUint32(20, sz, true); ch.setUint32(24, sz, true);
+    ch.setUint16(28, nm.length, true); ch.setUint32(42, off, true);
+    cen.push(ch.buffer, nm);
+    off += 30 + nm.length + sz;
+  }
+  const cs = cen.reduce((a, b) => a + b.byteLength, 0), end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, cs, true); end.setUint32(16, off, true);
+  return new Blob([...parts, ...cen, end.buffer], { type: 'application/zip' });
+}
+
+async function inflateRaw(u8) {
+  if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot read compressed zips. Re-zip with "store" (no compression) or use Chrome/Edge.');
+  const s = new Blob([u8]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+
+async function parseZip(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf); let e = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { e = i; break; }
+  if (e < 0) throw new Error('Not a zip file (no end-of-directory record).');
+  const n = dv.getUint16(e + 10, true); let p = dv.getUint32(e + 16, true); const out = [], dec = new TextDecoder();
+  for (let k = 0; k < n; k++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('Corrupt zip directory.');
+    const method = dv.getUint16(p + 10, true), csz = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true),
+          el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lo = dv.getUint32(p + 42, true);
+    const name = dec.decode(u8.subarray(p + 46, p + 46 + nl)).replace(/\\/g, '/'); p += 46 + nl + el + cl;
+    if (name.endsWith('/')) { out.push({ name, data: null }); continue; }
+    const ds = lo + 30 + dv.getUint16(lo + 26, true) + dv.getUint16(lo + 28, true), raw = u8.subarray(ds, ds + csz);
+    let data;
+    if (method === 0) data = raw; else if (method === 8) data = await inflateRaw(raw); else throw new Error('Unsupported zip method ' + method + ' for ' + name);
+    out.push({ name, data });
+  }
+  return out;
+}
+setLayout(64, 4, 8);
+/* ==CORE END== */
+
+
+// ======================================================================
+//  UI
+// ======================================================================
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const MAX_STEP = 0.05;   // browser safety: no single weight update larger than this
+
+const state = {
+  mode: null, root: null, srcName: '', classes: [], samples: [], skipped: 0,
+  net: null, wStatus: 'none', wNote: '', dirty: false, hadConfig: false, zipHadWeights: false,
+  stream: null, live: false, insp: null, wrong: [], cm: null, evalStale: false, evalCount: 0,
+  openCls: new Set(), marks: new Set(), training: false, stop: false, pause: false, hist: { loss: [], tacc: [], vacc: [] }, epochsPlanned: 20
+};
+const heat = { agg: 'max', overlay: true };
+const pathOf = s => '/images/' + state.classes[s.cls] + '/' + s.name;
+
+function log(m) {
+  const c = $('console'); c.value += '[' + new Date().toLocaleTimeString() + '] ' + m + '\n';
+  if (c.value.length > 60000) c.value = c.value.slice(-40000);
+  c.scrollTop = c.scrollHeight;
+}
+
+// ---------- image decode (same path as the firmware: 240x240 JPEG -> RGB -> nearest resample) ----------
+const scratch = document.createElement('canvas'); scratch.width = scratch.height = SRC;
+const sctx = scratch.getContext('2d', { willReadFrequently: true });
+const loadImg = url => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('image decode failed')); i.src = url; });
+let warnedSize = false;
+async function decodeBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await loadImg(url);
+    if ((img.naturalWidth !== SRC || img.naturalHeight !== SRC) && !warnedSize) { warnedSize = true; log('Note: an image is ' + img.naturalWidth + 'x' + img.naturalHeight + ', not 240x240. It is scaled to 240x240 first. Device images are always 240x240.'); }
+    sctx.clearRect(0, 0, SRC, SRC); sctx.drawImage(img, 0, 0, SRC, SRC);
+    return sctx.getImageData(0, 0, SRC, SRC).data;
+  } finally { URL.revokeObjectURL(url); }
+}
+async function getInput(s) { if (!s.input) s.input = rgbaToInput(await decodeBlob(s.blob)); return s.input; }
+
+// ---------- data model helpers ----------
+function addSample(cls, name, blob) { const s = { cls, name, blob, url: URL.createObjectURL(blob), input: null }; state.samples.push(s); return s; }
+function counts() { const c = new Array(state.classes.length).fill(0); for (const s of state.samples) c[s.cls]++; return c; }
+function clearData() {
+  for (const s of state.samples) URL.revokeObjectURL(s.url);
+  Object.assign(state, { marks: new Set(), samples: [], classes: [], net: null, wStatus: 'none', wNote: '', dirty: false, hadConfig: false, zipHadWeights: false, skipped: 0, wrong: [], cm: null, evalStale: false, insp: null });
+  state.hist = { loss: [], tacc: [], vacc: [] };
+}
+function resetModel() { state.net = null; state.wStatus = 'none'; state.wNote = ''; state.dirty = false; state.cm = null; state.wrong = []; }
+function ensureNet() { const N = state.classes.length; if (!state.net || state.net.N !== N) { state.net = makeNet(N); state.wStatus = 'none'; } return state.net; }
+function hasModel() { return state.net && state.net.N === state.classes.length && state.net.key === layoutKey() && state.wStatus !== 'none' && state.wStatus !== 'refused'; }
+
+function splitParams() { const mode = $('valMode').value, v = parseFloat($('valAmt').value); return { mode, p: Math.max(0, Number.isFinite(v) ? v : 0) }; }
+function currentSplit() {
+  const { mode, p } = splitParams();
+  return splitData(state.samples.map(s => ({ cls: s.cls, path: pathOf(s), ref: s })), state.classes.length, mode, mode === 'fw' ? Math.floor(p) : p);
+}
+
+// ---------- weights ----------
+function applyWeights(buf) {
+  const N = state.classes.length;
+  if (N < 1) { state.wStatus = 'refused'; state.wNote = 'A weights file was found but there are no classes, so its size cannot be checked.'; return; }
+  let exp = totalFloats(N) * 4;
+  if (buf.byteLength !== exp) {
+    const c = findLayouts(buf.byteLength, N);
+    if (c.length === 1) {
+      const from = layoutKey(); setLayout(c[0][0], c[0][1], c[0][2]); syncLayoutControls(); state.samples.forEach(s => s.input = null);
+      log('Layout changed from ' + from + ' to ' + layoutKey() + ' (input x conv1 x conv2): it is the only layout whose weight file size fits.');
+      exp = totalFloats(N) * 4;
+    } else {
+      state.wStatus = 'refused';
+      state.wNote = 'Refused: myWeights.bin is ' + buf.byteLength + ' bytes but the current layout (input ' + IN + ', filters ' + C1F + '/' + C2F + ') with ' + N + ' classes needs ' + exp + ' bytes. ' +
+        (c.length ? 'Layouts that fit this file: ' + c.slice(0, 4).map(x => 'input ' + x[0] + ', filters ' + x[1] + '/' + x[2]).join('; ') + '. Set one of them in section 3, then load again.' : 'No layout on this page fits that size, so the class count is probably different.');
       return;
     }
   }
-  myHandleMenuNavigation();
+  const net = makeNet(N); parseWeights(net, buf);
+  if (!weightsFinite(net)) { state.wStatus = 'refused'; state.wNote = 'Refused: myWeights.bin contains NaN or Infinity.'; return; }
+  state.net = net; state.wStatus = 'loaded'; state.wNote = 'Loaded header/myWeights.bin (' + buf.byteLength + ' bytes, size matches ' + N + ' classes, input ' + IN + ', filters ' + C1F + '/' + C2F + ').';
 }
 
-
-
-// ██████████████████████████████████████████████████████████████████████████████
-// ██                                                                          ██
-// ██  PART 1: IMAGE COLLECTION FUNCTIONS                                      ██
-// ██                                                                          ██
-// ██  DEPENDENCIES (functions called from Part 0):                            ██
-// ██  - myResetMenuState()                     [Part 4]                       ██
-// ██  - myReadTouch()                          [Part 4]                       ██
-// ██                                                                          ██
-// ██  VARIABLES USED (defined in Part 0):                                     ██
-// ██  - myClassLabels[NUM_CLASSES], myThresholdPress, myLongPressTime                   ██
-// ██  - u8g2 (OLED display object)                                            ██
-// ██                                                                          ██
-// ██████████████████████████████████████████████████████████████████████████████
-
-
-// ======================================================
-// SHARED OLED RENDER HELPER
-// Renders myRgbBuffer (must already be filled) to OLED.
-// imageCount >= 0  -> show count badge (post-capture mode)
-// imageCount == -1 -> show LIVE badge (preview mode)
-// ======================================================
-void myRenderRgbToOLED(int imageCount) {
-  int myOledWidth  = u8g2.getDisplayWidth();
-  int myOledHeight = u8g2.getDisplayHeight();
-  int myScaleX = 240 / myOledWidth;
-  int myScaleY = 240 / myOledHeight;
-
-  u8g2.firstPage();
-  do {
-    for (int myOledX = 0; myOledX < myOledWidth; myOledX++) {
-      for (int myOledY = 0; myOledY < myOledHeight; myOledY++) {
-        size_t myPixelIndex = ((myOledY * myScaleY) * 240 + (myOledX * myScaleX)) * 3;
-        uint8_t myBrightness = (myRgbBuffer[myPixelIndex]     +
-                                myRgbBuffer[myPixelIndex + 1] +
-                                myRgbBuffer[myPixelIndex + 2]) / 3;
-        if (myBrightness > 100) u8g2.drawPixel(myOledX, myOledY);
-      }
-    }
-    if (imageCount >= 0) {
-      // Post-capture: count badge top-left
-      u8g2.setFont(u8g2_font_ncenB10_tr);
-      u8g2.setColorIndex(0);
-      u8g2.drawBox(0, 0, 20, 15);
-      u8g2.setColorIndex(1);
-      u8g2.setCursor(3, 10);
-      u8g2.print(String(imageCount));
-    } else {
-      // Live preview: LIVE badge top-right
-      u8g2.setFont(u8g2_font_5x7_tf);
-      u8g2.setColorIndex(0);
-      u8g2.drawBox(50, 0, 22, 8);
-      u8g2.setColorIndex(1);
-      u8g2.drawStr(52, 7, "LIVE");
-    }
-  } while (u8g2.nextPage());
+// ---------- loading ----------
+async function getFileAt(root, parts) {
+  try { let d = root; for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p); return await (await d.getFileHandle(parts[parts.length - 1])).getFile(); }
+  catch (e) { return null; }
 }
 
-// Post-capture snapshot: convert fb -> myRgbBuffer then render with count badge
-void myDisplayImageOnOLED(camera_fb_t* fb, int imageCount) {
-  if (!myRgbBuffer) {
-    Serial.println("RGB buffer not allocated - skipping OLED preview");
-    return;
-  }
-  if (!fmt2rgb888(fb->buf, fb->len, fb->format, myRgbBuffer)) {
-    Serial.println("Failed to convert JPEG to RGB888 for OLED");
-    return;
-  }
-  myRenderRgbToOLED(imageCount);
-}
-
-
-void myActionCollect(int classIdx) {
-  if (!mySDavailable) {
-    Serial.println("No SD card - cannot collect images");
-    u8g2.firstPage();
-    do { u8g2.drawStr(0, 15, "No SD card"); } while (u8g2.nextPage());
-    delay(2000);
-    myResetMenuState();
-    return;
-  }
-
-  Serial.printf("\n>>> Collection mode: %s\n", myClassLabels[classIdx].c_str());
-  Serial.println("Instructions:");
-  Serial.println("  TAP (1-2 taps) = Capture image");
-  Serial.println("  LONG PRESS (3+ taps) = Exit to menu");
-  Serial.println("  Serial: 'T'=capture, 'L'=exit");
-  
-  myResetTouchState();  // Clear touch state when entering
-  
-  String path = "/images/" + myClassLabels[classIdx];
-  if (!SD.exists("/images")) SD.mkdir("/images");
-  if (!SD.exists(path)) SD.mkdir(path);
-
-
-  // Count only the active class — no need to scan all folders on menu entry
-  int counts[NUM_CLASSES] = {};
-  File root = SD.open("/images/" + myClassLabels[classIdx]);
-  if(root) {
-    while(File file = root.openNextFile()) {
-      if(!file.isDirectory() && (String(file.name()).endsWith(".jpg") || 
-        String(file.name()).endsWith(".JPG"))) {
-        counts[classIdx]++;
-      }
-      file.close();
-    }
-    root.close();
-  }
-
-  unsigned long lastCameraDrain = 0;  // how often we service the camera buffer
-  unsigned long lastOLED = 0; unsigned long lastDebugPreview = 0;         // how often we actually update the OLED
-  bool oledNeedsUpdate = false;
-  bool shouldCapture = false;
-
-  while (true) {
-    unsigned long now = millis();
-
-    // --- FAST LOOP: drain camera buffer every 50ms to prevent FB-OVF ---
-    if (now - lastCameraDrain > 50) {
-      lastCameraDrain = now;
-
-      if (!shouldCapture) {  // don't grab preview frames if a capture is pending
-        camera_fb_t* fb = esp_camera_fb_get();
-        if (fb) {
-          // v47: slow live preview to the web page (only when it asked for debug frames)
-          if (myDebugStream && now - lastDebugPreview > 1000) {
-            lastDebugPreview = now;
-            myDebugSendFrame('P', counts[classIdx], fb, -1, nullptr);
-          }
-          // Only pay for RGB conversion when the OLED is due for a refresh (250ms)
-          if (now - lastOLED > 250 && myRgbBuffer) {
-            if (fmt2rgb888(fb->buf, fb->len, fb->format, myRgbBuffer)) {
-              oledNeedsUpdate = true;
-              lastOLED = now;
-            }
-          }
-          esp_camera_fb_return(fb);
+async function pickDir() {
+  let root;
+  try { root = await window.showDirectoryPicker({ mode: 'readwrite' }); }
+  catch (e) { if (e.name !== 'AbortError') log('Folder pick failed: ' + e.message); return; }
+  try {
+    $('sourceInfo').textContent = 'Reading ' + root.name + ' ...';
+    const folders = [], items = []; let skipped = 0, imagesDir = null;
+    try { imagesDir = await root.getDirectoryHandle('images'); } catch (e) { /* none */ }
+    if (imagesDir) {
+      for await (const [name, h] of imagesDir.entries()) if (h.kind === 'directory' && !name.startsWith('.')) folders.push(name);
+      for (const name of folders) {
+        const d = await imagesDir.getDirectoryHandle(name);
+        for await (const [fn, h] of d.entries()) {
+          if (h.kind !== 'file') continue;
+          if (/\.(jpg|JPG)$/.test(fn)) items.push({ clsName: name, name: fn, blob: await h.getFile() }); else skipped++;
         }
       }
     }
+    let cfg = null; const cf = await getFileAt(root, ['header', 'config.json']);
+    if (cf) { try { cfg = JSON.parse(await cf.text()); } catch (e) { log('config.json could not be parsed and was ignored.'); } }
+    const wf = await getFileAt(root, ['header', 'myWeights.bin']);
+    await ingest({ mode: 'dir', root, name: root.name, folders, items, cfg, weights: wf ? await wf.arrayBuffer() : null, skipped, hadImagesDir: !!imagesDir });
+  } catch (e) { log('Could not read the folder: ' + e.message); $('sourceInfo').textContent = 'Could not read the folder: ' + e.message; }
+}
 
-    // --- SLOW LOOP: render to OLED only when fresh RGB is ready ---
-    if (oledNeedsUpdate) {
-      oledNeedsUpdate = false;
-      myRenderRgbToOLED(-1);  // -1 = show LIVE badge
-    }
-
-    // --- SERIAL INPUT ---
-    if (Serial.available()) {
-      char c = Serial.read();
-      if (myHandleDebugChar(c)) {
-        // handled: web page debug heartbeat
-      } else if (c == 'l' || c == 'L') {
-        myResetMenuState();
-        return;
-      } else if (c == 't' || c == 'T') {
-        shouldCapture = true;
+async function loadZipFile(file) {
+  try {
+    $('sourceInfo').textContent = 'Reading ' + file.name + ' ...';
+    const entries = await parseZip(await file.arrayBuffer());
+    const folders = new Set(), items = []; let cfg = null, weights = null, skipped = 0, m, hadImagesDir = false;
+    for (const e of entries) {
+      if (/(^|\/)__MACOSX\//.test(e.name)) continue;
+      if ((m = e.name.match(/(?:^|\/)images\/([^\/]+)\/$/))) { folders.add(m[1]); hadImagesDir = true; continue; }
+      if ((m = e.name.match(/(?:^|\/)images\/([^\/]+)\/([^\/]+)$/))) {
+        folders.add(m[1]); hadImagesDir = true;
+        if (/\.(jpg|JPG)$/.test(m[2])) items.push({ clsName: m[1], name: m[2], blob: new Blob([e.data], { type: 'image/jpeg' }) }); else skipped++;
+        continue;
       }
+      if (/(?:^|\/)header\/myWeights\.bin$/.test(e.name)) weights = e.data.slice().buffer;
+      else if (/(?:^|\/)header\/config\.json$/.test(e.name)) { try { cfg = JSON.parse(new TextDecoder().decode(e.data)); } catch (x) { log('config.json in the zip could not be parsed and was ignored.'); } }
     }
+    await ingest({ mode: 'zip', root: null, name: file.name, folders: [...folders], items, cfg, weights, skipped, hadImagesDir });
+  } catch (e) { log('Could not read the zip: ' + e.message); $('sourceInfo').textContent = 'Could not read the zip: ' + e.message; }
+}
 
-    // --- TOUCH INPUT - unified system ---
-    int touchAction = myCheckTouchInput();
-    if (touchAction == 2) {
-      // Long press (3+ taps) - exit
-      Serial.println("Exiting collection mode");
-      myResetMenuState();
-      return;
-    } else if (touchAction == 1) {
-      // Tap (1-2 taps) - capture
-      shouldCapture = true;
+async function ingest(src) {
+  clearData();
+  state.mode = src.mode; state.root = src.root; state.srcName = src.name; state.skipped = src.skipped; state.hadImagesDir = src.hadImagesDir;
+  let order = [];
+  if (src.cfg && Array.isArray(src.cfg.classes)) { order = src.cfg.classes.filter(c => typeof c === 'string'); state.hadConfig = true; }
+  order = order.concat(src.folders.filter(f => !order.includes(f)).sort());
+  state.classes = order;
+  if (src.cfg && layoutValid(src.cfg.input_size, src.cfg.conv1_filters, src.cfg.conv2_filters)) {
+    setLayout(src.cfg.input_size, src.cfg.conv1_filters, src.cfg.conv2_filters); syncLayoutControls();
+  }
+  for (const it of src.items) addSample(order.indexOf(it.clsName), it.name, it.blob);
+  state.zipHadWeights = !!src.weights;
+  if (src.weights) applyWeights(src.weights);
+  log('Loaded ' + src.name + ': ' + order.length + ' classes, ' + state.samples.length + ' images' + (state.skipped ? ', ' + state.skipped + ' non-.jpg files ignored' : '') + '.');
+  if (state.wNote) log(state.wNote);
+  renderAll();
+}
+
+// ---------- rendering ----------
+function renderAll() { renderSource(); renderClasses(); renderBrowser(); renderModelInfo(); updateSplitInfo(); renderEval(); drawCharts(); }
+
+function renderSource() {
+  const c = counts(), n = state.samples.length; let h = '';
+  if (!state.mode) { $('sourceInfo').innerHTML = 'Nothing loaded yet. Pick the root of the SD card (the folder that contains <b>images</b> and <b>header</b>).'; return; }
+  h += '<div><b>' + esc(state.srcName) + '</b> - ' + (state.mode === 'dir' ? 'SD folder, changes are written to the card' : 'zip, changes stay in memory until you Save .zip') + '</div>';
+  if (!state.hadImagesDir) h += '<div class="bad">No images/ folder found. Expected images/&lt;class&gt;/img_*.jpg. You can add classes below.</div>';
+  h += '<div>Classes: ' + state.classes.length + ' (' + state.classes.map((k, i) => esc(k) + ' ' + c[i]).join(', ') + ') - ' + n + ' images</div>';
+  if (state.wStatus === 'refused') h += '<div class="bad">Weights: ' + esc(state.wNote) + '</div>';
+  else if (state.wStatus === 'loaded' || state.wStatus === 'trained') h += '<div class="ok">Weights: ' + esc(state.wNote || 'model in memory') + '</div>';
+  else h += '<div>Weights: no header/myWeights.bin found. Training starts from random He-init, like the device.</div>';
+  h += state.hadConfig ? '<div>config.json found: class order and layout are taken from it. firmware-v003 and later read the class names from it at boot; older firmware ignores it.</div>'
+                       : '<div>No config.json: class folders are sorted alphabetically. Keep numeric prefixes so this matches myClassLabels[].</div>';
+  if (state.skipped) h += '<div class="warn">' + state.skipped + ' files ignored: the firmware only counts .jpg and .JPG.</div>';
+  $('sourceInfo').innerHTML = h;
+}
+
+function renderClasses() {
+  const c = counts(), sp = state.samples.length ? currentSplit() : { train: [], val: [] };
+  const tc = new Array(state.classes.length).fill(0), vc = tc.slice();
+  sp.train.forEach(s => tc[s.cls]++); sp.val.forEach(s => vc[s.cls]++);
+  const tb = $('classTable').querySelector('tbody');
+  tb.innerHTML = state.classes.length ? state.classes.map((k, i) =>
+    '<tr><td>' + esc(k) + '</td><td>' + c[i] + '</td><td>' + tc[i] + ' / ' + vc[i] + (tc[i] === 0 && c[i] > 0 ? ' <span class="bad">nothing to train on</span>' : '') +
+    '</td><td><button class="danger" data-rm="' + i + '">Remove</button></td></tr>').join('')
+    : '<tr><td colspan="4" class="note">No classes yet.</td></tr>';
+  tb.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => removeClass(+b.dataset.rm));
+  $('fwLines').textContent = '#define INPUT_SIZE ' + IN + '\n#define CONV1_FILTERS ' + C1F + '\n#define CONV2_FILTERS ' + C2F + '\n' +
+    (state.classes.length ? '#define NUM_CLASSES ' + state.classes.length + '\nString myClassLabels[NUM_CLASSES] = {' + state.classes.map(k => '"' + k + '"').join(', ') + '};' : '// add classes to get NUM_CLASSES and myClassLabels[]');
+  const sel = $('capClass'), keep = sel.value;
+  sel.innerHTML = state.classes.map((k, i) => '<option value="' + i + '">' + esc(k) + '</option>').join('');
+  if (keep && state.classes[+keep]) sel.value = keep;
+}
+
+function renderBrowser() {
+  const b = $('browser'); b.innerHTML = '';
+  const by = state.classes.map(() => []); state.samples.forEach(s => by[s.cls].push(s));
+  state.classes.forEach((k, i) => {
+    const d = document.createElement('details'); d.open = state.openCls.has(k);
+    d.ontoggle = () => { if (d.open) state.openCls.add(k); else state.openCls.delete(k); if (d.open && !d.dataset.filled) fill(); };
+    const sm = document.createElement('summary'); sm.textContent = k + ' - ' + by[i].length + ' images'; d.appendChild(sm);
+    const g = document.createElement('div'); g.className = 'thumbs'; d.appendChild(g);
+    function fill() {
+      d.dataset.filled = '1';
+      by[i].slice().sort((a, c) => a.name < c.name ? -1 : 1).forEach(s => {
+        const im = document.createElement('img'); im.src = s.url; im.loading = 'lazy'; im.alt = s.name; im.title = s.name; im.onclick = () => openInsp(s); g.appendChild(im);
+      });
     }
+    if (d.open) fill();
+    b.appendChild(d);
+  });
+  if (!state.classes.length) b.innerHTML = '<p class="note">Load a data source to browse samples.</p>';
+}
 
-    // --- CAPTURE ---
-    if (shouldCapture) {
-      shouldCapture = false;
-      camera_fb_t* fb = esp_camera_fb_get();
-      if (fb) {
-        String fileName = path + "/img_" + String(millis()) + ".jpg";
-        File file = SD.open(fileName, FILE_WRITE);
-        if (file) {
-          file.write(fb->buf, fb->len);
-          file.close();
-          counts[classIdx]++;
-          Serial.printf("Saved: %s (Total: %d)\n", fileName.c_str(), counts[classIdx]);
-          myDisplayImageOnOLED(fb, counts[classIdx]);  // shows count badge
-          myDebugSendFrame('C', counts[classIdx], fb, -1, nullptr);   // v47: saved image to the web page
-          delay(300);
-          lastOLED = millis();  // don't immediately overwrite the snapshot with LIVE
-        }
-        esp_camera_fb_return(fb);
+function renderModelInfo() {
+  const N = state.classes.length; let h = '';
+  h += '<div>Architecture: input ' + IN + 'x' + IN + 'x3 RGB (0..1) &rarr; conv 3x3x' + C1F + ' (leaky 0.1) &rarr; maxpool 2 &rarr; conv 3x3x' + C2F + ' (leaky 0.1) &rarr; flatten ' + FLAT + ' &rarr; dense ' + (N || 'N') + ' &rarr; softmax. The sketch must be compiled with the same INPUT_SIZE and filter counts (section 2 shows the lines).</div>';
+  if (N) h += '<div>Parameters: ' + totalFloats(N).toLocaleString() + ' floats, weight file ' + (totalFloats(N) * 4).toLocaleString() + ' bytes (' + N + ' classes)</div>';
+  h += '<div>Model in memory: ' + ({ none: 'none (random init on the next Train)', refused: 'none, weights file was refused', loaded: 'loaded from the SD card', trained: 'trained in this browser' + (state.dirty ? ', not saved yet' : ', saved') }[state.wStatus]) + '</div>';
+  if (state.wStatus === 'refused') h += '<div class="bad">' + esc(state.wNote) + '</div>';
+  $('modelInfo').innerHTML = h;
+}
+
+function updateSplitInfo() {
+  if (!state.samples.length) { $('splitInfo').textContent = ''; return; }
+  const sp = currentSplit(), vc = new Array(state.classes.length).fill(0); sp.val.forEach(s => vc[s.cls]++);
+  $('splitInfo').textContent = 'Train ' + sp.train.length + ' images. Validation ' + sp.val.length + ' images (' + state.classes.map((k, i) => k + ' ' + vc[i]).join(', ') + ').' +
+    (splitParams().mode === 'fw' ? ' Same images the device holds out when its VALIDATION_IMAGES is ' + Math.floor(splitParams().p) + '.' : '');
+}
+
+// ---------- class management ----------
+async function classDir(ci, create) { const img = await state.root.getDirectoryHandle('images', { create }); return img.getDirectoryHandle(state.classes[ci], { create }); }
+async function writeFile(dir, name, blob) { const w = await (await dir.getFileHandle(name, { create: true })).createWritable(); await w.write(blob); await w.close(); }
+
+async function addClass() {
+  const name = $('newClass').value.trim();
+  if (!state.mode) { alert('Load a data source first.'); return; }
+  if (!name || /[\/\\:*?"<>|]/.test(name) || name.startsWith('.')) { alert('Use a plain folder name without / \\ : * ? " < > |'); return; }
+  if (state.classes.includes(name)) { alert('That class already exists.'); return; }
+  if (state.dirty && !confirm('Adding a class changes the weight layout and discards the unsaved model in memory. Continue?')) return;
+  if (state.mode === 'dir') { try { await classDir(-1 + 0, true).catch(() => 0); } catch (e) { /* handled below */ } }
+  state.classes.push(name);
+  if (state.mode === 'dir') { try { await classDir(state.classes.length - 1, true); } catch (e) { state.classes.pop(); log('Could not create the folder: ' + e.message); return; } }
+  $('newClass').value = ''; resetModel();
+  log('Added class ' + name + '. Model in memory discarded: the weight file size changes with the class count. Update NUM_CLASSES and myClassLabels[] in the sketch.');
+  renderAll();
+}
+
+async function removeClass(i) {
+  const name = state.classes[i], n = state.samples.filter(s => s.cls === i).length;
+  if (!confirm('Remove class "' + name + '" and delete its ' + n + ' images from the ' + (state.mode === 'dir' ? 'SD card folder' : 'zip data') + '? This cannot be undone.')) return;
+  if (state.dirty && !confirm('This also discards the unsaved model in memory. Continue?')) return;
+  if (state.mode === 'dir') { try { const img = await state.root.getDirectoryHandle('images'); await img.removeEntry(name, { recursive: true }); } catch (e) { log('Could not delete the folder: ' + e.message); return; } }
+  state.samples = state.samples.filter(s => { if (s.cls === i) { URL.revokeObjectURL(s.url); return false; } if (s.cls > i) s.cls--; return true; });
+  state.classes.splice(i, 1); resetModel();
+  log('Removed class ' + name + '. Model in memory discarded.');
+  renderAll();
+}
+
+// ---------- camera ----------
+const capCanvas = document.createElement('canvas'); capCanvas.width = capCanvas.height = SRC;
+const cctx = capCanvas.getContext('2d');
+async function startCam() {
+  if (state.stream) return;
+  try { state.stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 } }, audio: false }); }
+  catch (e) { log('Camera error: ' + e.message); return; }
+  for (const v of [$('capVideo'), $('liveVideo')]) { v.srcObject = state.stream; try { await v.play(); } catch (e) { /* ignore */ } }
+  $('btnCam').textContent = 'Stop camera';
+}
+function stopCam() {
+  state.live = false; $('btnLive').textContent = 'Start live';
+  if (state.stream) state.stream.getTracks().forEach(t => t.stop());
+  state.stream = null; for (const v of [$('capVideo'), $('liveVideo')]) v.srcObject = null;
+  $('btnCam').textContent = 'Start camera';
+}
+function grabFrame() {
+  const v = $('capVideo').videoWidth ? $('capVideo') : $('liveVideo');
+  if (!v.videoWidth) return false;
+  const side = Math.min(v.videoWidth, v.videoHeight), sx = (v.videoWidth - side) / 2, sy = (v.videoHeight - side) / 2;
+  cctx.save();
+  if ($('mirror').checked) { cctx.translate(SRC, 0); cctx.scale(-1, 1); }
+  cctx.drawImage(v, sx, sy, side, side, 0, 0, SRC, SRC);
+  cctx.restore();
+  return true;
+}
+const frameBlob = () => new Promise(r => capCanvas.toBlob(r, 'image/jpeg', 0.85));
+
+async function capture() {
+  if (!state.mode) { log('Load a data source first (section 1).'); return; }
+  const ci = parseInt($('capClass').value);
+  if (!state.classes[ci]) { log('Add or pick a class first.'); return; }
+  if (!state.stream || !grabFrame()) { log('Start the camera first.'); return; }
+  const blob = await frameBlob(), name = 'img_' + Date.now() + '.jpg';
+  if (state.mode === 'dir') { try { await writeFile(await classDir(ci, true), name, blob); } catch (e) { log('Write to the SD folder failed: ' + e.message); return; } }
+  addSample(ci, name, blob); state.evalStale = true;
+  log('Captured ' + name + ' into ' + state.classes[ci] + ' (' + counts()[ci] + ' images).');
+  renderSource(); renderClasses(); renderBrowser(); updateSplitInfo();
+}
+
+// ---------- heatmap ----------
+const heatCanvas = document.createElement('canvas'); heatCanvas.width = heatCanvas.height = C2O;
+function heatColor(t) {
+  const c = v => Math.max(0, Math.min(1, v));
+  return [255 * c(1.5 - Math.abs(4 * t - 3)), 255 * c(1.5 - Math.abs(4 * t - 2)), 255 * c(1.5 - Math.abs(4 * t - 1))];
+}
+function paintHeat(ctx, size, get, side) {   // get(i) -> 0..1 for each cell of a side x side map
+  heatCanvas.width = heatCanvas.height = side;
+  const hc = heatCanvas.getContext('2d'), id = hc.createImageData(side, side);
+  for (let i = 0; i < side * side; i++) { const [r, g, b] = heatColor(get(i)); id.data[i * 4] = r; id.data[i * 4 + 1] = g; id.data[i * 4 + 2] = b; id.data[i * 4 + 3] = 255; }
+  hc.putImageData(id, 0, 0);
+  ctx.save(); ctx.globalAlpha = 0.55; ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(heatCanvas, 0, 0, size, size); ctx.restore();
+}
+function drawHeatOn(ctx, size, net, agg) {
+  const c = net.a.c2o, n = C2O * C2O, mp = new Float32Array(n); let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < n; i++) {
+    let m = -Infinity, s = 0;
+    for (let f = 0; f < C2F; f++) { const v = c[f * n + i]; if (v > m) m = v; s += v; }
+    mp[i] = agg === 'mean' ? s / C2F : m; if (mp[i] < lo) lo = mp[i]; if (mp[i] > hi) hi = mp[i];
+  }
+  const span = (hi - lo) || 1;
+  paintHeat(ctx, size, i => (mp[i] - lo) / span, C2O);
+}
+function barsHtml(p) {
+  const top = argmax(p);
+  return state.classes.map((k, i) => '<div class="prob"><span' + (i === top ? ' style="color:var(--acc);font-weight:600"' : '') + '>' + esc(k) + '</span><div class="bar"><i style="width:' + (p[i] * 100).toFixed(1) + '%"></i></div><span>' + (p[i] * 100).toFixed(1) + '%</span></div>').join('');
+}
+function syncHeatControls() {
+  document.querySelectorAll('.heatAgg').forEach(e => e.value = heat.agg);
+  document.querySelectorAll('.heatOverlay').forEach(e => e.checked = heat.overlay);
+}
+
+// ---------- inspector ----------
+async function openInsp(s) {
+  state.insp = s;
+  $('inspTitle').textContent = state.classes[s.cls] + ' / ' + s.name;
+  $('inspMove').innerHTML = state.classes.map((k, i) => i === s.cls ? '' : '<option value="' + i + '">' + esc(k) + '</option>').join('');
+  $('inspMoveBtn').disabled = state.classes.length < 2;
+  if (!$('insp').open) $('insp').showModal();
+  await drawInsp();
+}
+async function drawInsp() {
+  const s = state.insp; if (!s || !$('insp').open) return;
+  const cv = $('inspCanvas'), ctx = cv.getContext('2d');
+  const img = await loadImg(s.url);
+  ctx.imageSmoothingEnabled = false; ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  if (state.net && state.net.N === state.classes.length && state.wStatus !== 'none' && state.wStatus !== 'refused') {
+    forward(state.net, await getInput(s));
+    if (heat.overlay) drawHeatOn(ctx, cv.width, state.net, heat.agg);
+    $('inspProbs').innerHTML = barsHtml(state.net.a.probs);
+  } else $('inspProbs').innerHTML = '<p class="note">No model in memory. Train or load weights to see predictions and the heatmap.</p>';
+}
+async function deleteSample(s) {
+  if (!confirm('Delete ' + state.classes[s.cls] + '/' + s.name + ' from the ' + (state.mode === 'dir' ? 'SD card folder' : 'zip data') + '? This cannot be undone.')) return;
+  if (state.mode === 'dir') { try { await (await classDir(s.cls, false)).removeEntry(s.name); } catch (e) { log('Delete failed: ' + e.message); return; } }
+  URL.revokeObjectURL(s.url); state.samples = state.samples.filter(x => x !== s);
+  state.wrong = state.wrong.filter(w => w.s !== s); state.evalStale = true;
+  log('Deleted ' + s.name + '.'); afterEdit();
+}
+async function moveSample(s, to) {
+  if (!state.classes[to] || to === s.cls) return;
+  let name = s.name;
+  if (state.mode === 'dir') {
+    try {
+      const dst = await classDir(to, true);
+      try { await dst.getFileHandle(name); name = name.replace(/\.(jpg|JPG)$/, '') + '_m.jpg'; } catch (e) { /* free */ }
+      await writeFile(dst, name, s.blob);
+      await (await classDir(s.cls, false)).removeEntry(s.name);
+    } catch (e) { log('Move failed: ' + e.message); return; }
+  }
+  const from = state.classes[s.cls]; s.cls = to; s.name = name; state.evalStale = true;
+  const w = state.wrong.find(x => x.s === s); if (w) state.wrong = state.wrong.filter(x => x !== w);
+  log('Moved ' + name + ' from ' + from + ' to ' + state.classes[to] + '.'); afterEdit();
+}
+function afterEdit() { $('insp').close(); state.insp = null; renderSource(); renderClasses(); renderBrowser(); updateSplitInfo(); renderEval(); }
+
+// ---------- parity self-test ----------
+async function parity(s) {
+  if (!hasModel()) { log('Parity: no model in memory. Train or load weights first.'); return; }
+  s = s || state.insp || state.samples[0];
+  if (!s) { log('Parity: no samples loaded.'); return; }
+  const x = await getInput(s), net = state.net; forward(net, x);
+  const p = net.a.probs, pr = argmax(p), ctr = ((IN / 2) * IN + IN / 2) * 3;
+  log('Parity sample ' + pathOf(s) + ' (true class ' + state.classes[s.cls] + ')');
+  log('  input pixel[0] RGB ' + [x[0], x[1], x[2]].map(v => v.toFixed(4)).join(' ') + ' | centre pixel RGB ' + [x[ctr], x[ctr + 1], x[ctr + 2]].map(v => v.toFixed(4)).join(' '));
+  log('  logits (clipped dense output): ' + Array.from(net.a.logits).map(v => v.toFixed(4)).join(' '));
+  log('  Current Pred: ' + state.classes[pr] + ' (' + (p[pr] * 100).toFixed(1) + '%) | All:' + Array.from(p).map(v => ' ' + (v * 100).toFixed(0) + '%').join(''));
+}
+
+// ---------- charts ----------
+function drawChart(cv, title, series, ymaxFixed, isPct) {
+  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height, pl = 46, pr = 12, pt = 26, pb = 22, n = Math.max(state.epochsPlanned, 2);
+  ctx.fillStyle = '#0f1319'; ctx.fillRect(0, 0, W, H);
+  let ymax = ymaxFixed || 0.01;
+  if (!ymaxFixed) for (const s of series) for (const v of s.data) if (v != null && Number.isFinite(v)) ymax = Math.max(ymax, v);
+  if (!ymaxFixed) ymax *= 1.1;
+  ctx.font = '11px sans-serif'; ctx.fillStyle = '#8b9aac'; ctx.strokeStyle = '#2c3947'; ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {
+    const y = pt + (H - pt - pb) * (1 - g / 4); ctx.beginPath(); ctx.moveTo(pl, y); ctx.lineTo(W - pr, y); ctx.stroke();
+    const val = ymax * g / 4; ctx.fillText(isPct ? Math.round(val * 100) + '%' : val.toFixed(2), 4, y + 4);
+  }
+  ctx.fillText('epoch', W - 44, H - 6); ctx.fillText('1', pl, H - 6); ctx.fillText(String(n), W - pr - 18 - 14, H - 6);
+  let lx = pl; ctx.fillText(title, 4, 14);
+  for (const s of series) {
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color; ctx.lineWidth = 2; ctx.beginPath(); let started = false;
+    s.data.forEach((v, i) => {
+      if (v == null || !Number.isFinite(v)) return;
+      const x = pl + (W - pl - pr) * i / (n - 1), y = pt + (H - pt - pb) * (1 - v / ymax);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    s.data.forEach((v, i) => { if (v == null || !Number.isFinite(v)) return; ctx.beginPath(); ctx.arc(pl + (W - pl - pr) * i / (n - 1), pt + (H - pt - pb) * (1 - v / ymax), 3, 0, 7); ctx.fill(); });
+    ctx.fillText(s.label, W - pr - 150 + (lx - pl), 14); lx += 0; ctx.fillRect(W - pr - 165 + (lx - pl), 8, 10, 3); lx += 0;
+    ctx.fillStyle = '#8b9aac';
+  }
+}
+function drawCharts() {
+  const h = state.hist;
+  drawChart($('chLoss'), 'Training loss per epoch', [{ data: h.loss, color: '#e9b44c', label: 'loss' }], 0, false);
+  drawChart($('chAcc'), 'Accuracy per epoch', [{ data: h.tacc, color: '#66d1bd', label: 'train' }, { data: h.vacc, color: '#ef6b73', label: 'validation' }], 1, true);
+}
+
+// ---------- training UI ----------
+async function onTrain() {
+  if (state.training) return;
+  const N = state.classes.length;
+  if (N < 2) { alert('Need at least 2 classes with images. Load an SD card folder or zip first.'); return; }
+  const o = { lr: parseFloat($('lr').value), batch: parseInt($('batch').value), epochs: parseInt($('epochs').value), dropout: parseFloat($('dropout').value) || 0, augment: $('augment').checked, maxStep: MAX_STEP };
+  if (!(o.lr > 0) || !(o.batch >= 1) || !(o.epochs >= 1) || o.dropout < 0 || o.dropout >= 1) { alert('Check the training settings: learning rate > 0, batch >= 1, epochs >= 1, dropout 0 to 0.8.'); return; }
+  const cont = $('cont').checked && hasModel() && state.net.N === N;
+  if (!cont && state.net && state.dirty && !confirm('Starting fresh discards the unsaved model in memory. Continue?')) return;
+  const sp = currentSplit();
+  if (!sp.train.length) { alert('No training images after the validation hold-out. Add images or lower the validation amount.'); return; }
+  const empty = state.classes.filter((k, i) => !sp.train.some(s => s.cls === i));
+  if (empty.length) log('Warning: no training images for ' + empty.join(', ') + '. The model cannot learn those classes.');
+  state.training = true; state.stop = false; state.pause = false; setTrainButtons();
+  state.hist = { loss: [], tacc: [], vacc: [] }; state.epochsPlanned = o.epochs; drawCharts();
+  try {
+    const all = sp.train.concat(sp.val);
+    for (let i = 0; i < all.length; i++) {
+      await getInput(all[i]);
+      if (i % 10 === 0) { $('trainStatus').textContent = 'Decoding images ' + (i + 1) + ' / ' + all.length + ' ...'; await tick(); }
+    }
+    if (!cont) { state.net = makeNet(N); log('Started from random He-init weights.'); } else log('Continuing from the weights in memory.');
+    const net = state.net; for (const k of PARAM_ORDER) { net.m[k].fill(0); net.v[k].fill(0); }
+    log('Train ' + sp.train.length + ' images, validation ' + sp.val.length + ', batch ' + o.batch + ', ' + o.epochs + ' epochs, lr ' + o.lr + (o.augment ? ', augmentation on' : '') + (o.dropout ? ', dropout ' + o.dropout : '') + '.');
+    const t0 = performance.now();
+    const res = await runTraining(net, sp.train, sp.val, o, {
+      input: s => s.input,
+      stopped: () => state.stop, paused: () => state.pause,
+      onLog: m => log(m),
+      onBatch: b => { $('trainStatus').textContent = 'Epoch ' + b.epoch + '/' + o.epochs + '  batch ' + b.b + '/' + b.bpe + '  loss ' + b.loss.toFixed(4) + '  batch acc ' + Math.round(b.acc * 100) + '%  lr ' + b.lr; },
+      onEpoch: e => {
+        state.hist.loss.push(e.loss); state.hist.tacc.push(e.tacc); state.hist.vacc.push(e.vacc); drawCharts();
+        log('Epoch ' + e.epoch + '/' + o.epochs + '  loss ' + e.loss.toFixed(4) + '  train acc ' + (e.tacc * 100).toFixed(1) + '%' + (e.vacc == null ? '' : '  val acc ' + (e.vacc * 100).toFixed(1) + '%'));
       }
-    }
+    });
+    state.wStatus = 'trained'; state.dirty = true; state.wNote = 'Trained in this browser (not saved yet).'; state.evalStale = false;
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    $('trainStatus').textContent = (res.stopped ? 'Stopped' : (res.failed ? 'Stopped after repeated non-finite loss' : 'Training complete')) + ' in ' + secs + ' s. Model is in memory; save it in section 6.';
+    log($('trainStatus').textContent);
+    renderSource(); renderModelInfo(); renderClasses();
+    await runEval();
+  } catch (e) { log('Training error: ' + e.message); $('trainStatus').textContent = 'Training error: ' + e.message; }
+  state.training = false; state.pause = false; setTrainButtons();
+}
+function setTrainButtons() {
+  ['inSize', 'c1f', 'c2f'].forEach(id => $(id).disabled = state.training);
+  $('btnTrain').disabled = state.training; $('btnPause').disabled = !state.training; $('btnStop').disabled = !state.training;
+  $('btnPause').textContent = state.pause ? 'Resume' : 'Pause';
+}
 
-    delay(5);
+// ---------- evaluation ----------
+async function runEval() {
+  if (!hasModel()) { $('evalNote').textContent = 'No model in memory yet. Train, or load a folder that has header/myWeights.bin.'; return; }
+  let which = $('evalSet').value; const sp = currentSplit(); let set = which === 'val' ? sp.val : state.samples;
+  if (which === 'val' && !set.length) { set = state.samples; which = 'all'; log('No validation images, evaluating on all images instead.'); }
+  const N = state.classes.length, cm = Array.from({ length: N }, () => new Array(N).fill(0)), wrong = [];
+  for (let i = 0; i < set.length; i++) {
+    const s = set[i]; forward(state.net, await getInput(s));
+    const p = argmax(state.net.a.probs); cm[s.cls][p]++;
+    if (p !== s.cls) wrong.push({ s, pred: p, conf: state.net.a.probs[p] });
+    if (i % 25 === 24) await tick();
+  }
+  state.cm = { cm, which, n: set.length, valCounts: countBy(sp.val), allCounts: counts() }; state.wrong = wrong; state.evalStale = false;
+  renderEval();
+}
+const countBy = arr => { const c = new Array(state.classes.length).fill(0); arr.forEach(s => c[s.cls]++); return c; };
+
+function renderEval() {
+  const N = state.classes.length, E = state.cm;
+  if (!E || E.cm.length !== N) { $('cmWrap').innerHTML = ''; $('pcWrap').innerHTML = ''; $('pcWarn').innerHTML = ''; $('wrongGal').innerHTML = ''; if (!E) $('evalNote').textContent = hasModel() ? 'No evaluation yet. Press Update evaluation.' : 'No evaluation yet. It runs automatically when training ends.'; return; }
+  const cm = E.cm; let ok = 0; cm.forEach((r, i) => ok += r[i]);
+  $('evalNote').innerHTML = 'Evaluated ' + E.n + ' ' + (E.which === 'val' ? 'validation' : 'total') + ' images: ' + ok + ' correct (' + (E.n ? (100 * ok / E.n).toFixed(1) : '0') + '%). Rows are the true class, columns the predicted class.' +
+    (state.evalStale ? ' <span class="warn">The dataset changed since this evaluation. Press Update evaluation.</span>' : '') +
+    (E.which === 'val' && E.n < 30 ? ' <span class="warn">Only ' + E.n + ' validation images, so percentages are coarse.</span>' : '');
+  let h = '<table class="cm"><thead><tr><th>true \\ pred</th>' + state.classes.map(k => '<th>' + esc(k) + '</th>').join('') + '</tr></thead><tbody>';
+  cm.forEach((row, i) => {
+    const sum = row.reduce((a, b) => a + b, 0);
+    h += '<tr><th>' + esc(state.classes[i]) + '</th>' + row.map((v, j) => '<td class="' + (i === j ? 'diag' : '') + '" style="background:rgba(' + (i === j ? '102,209,189' : '239,107,115') + ',' + (sum ? (0.55 * v / sum).toFixed(2) : 0) + ')">' + v + '</td>').join('') + '</tr>';
+  });
+  $('cmWrap').innerHTML = h + '</tbody></table>';
+  let t = '<table><thead><tr><th>Class</th><th>Images (all)</th><th>Evaluated</th><th>Precision</th><th>Recall</th></tr></thead><tbody>';
+  const allc = counts(), warn = [];
+  for (let i = 0; i < N; i++) {
+    const tp = cm[i][i], rowSum = cm[i].reduce((a, b) => a + b, 0); let colSum = 0; for (let r = 0; r < N; r++) colSum += cm[r][i];
+    t += '<tr><td>' + esc(state.classes[i]) + '</td><td>' + allc[i] + '</td><td>' + rowSum + '</td><td>' + (colSum ? (100 * tp / colSum).toFixed(0) + '%' : '-') + '</td><td>' + (rowSum ? (100 * tp / rowSum).toFixed(0) + '%' : '-') + '</td></tr>';
+    if (allc[i] < 10) warn.push('<b>' + esc(state.classes[i]) + '</b> has only ' + allc[i] + ' images. Aim for 20 or more per class.');
+  }
+  const pos = allc.filter(c => c > 0);
+  if (pos.length > 1 && Math.max(...pos) > 3 * Math.min(...pos)) warn.push('Classes are imbalanced (' + Math.min(...pos) + ' to ' + Math.max(...pos) + ' images). The model will favour the big classes.');
+  $('pcWrap').innerHTML = t + '</tbody></table>';
+  $('pcWarn').innerHTML = warn.map(w => '<p class="warn">' + w + '</p>').join('');
+  const g = $('wrongGal'); g.innerHTML = '';
+  if (!state.wrong.length) g.innerHTML = '<p class="note">No misclassified images in this evaluation.</p>';
+  state.wrong.forEach(w => {
+    const f = document.createElement('figure'), im = document.createElement('img');
+    im.src = w.s.url; im.alt = w.s.name; f.appendChild(im);
+    const c = document.createElement('figcaption'); c.textContent = state.classes[w.s.cls] + ' \u2192 ' + state.classes[w.pred] + ' ' + (w.conf * 100).toFixed(0) + '%'; f.appendChild(c);
+    f.onclick = () => openInsp(w.s); g.appendChild(f);
+  });
+}
+
+// ---------- live inference ----------
+async function toggleLive() {
+  if (state.live) { state.live = false; $('btnLive').textContent = 'Start live'; return; }
+  if (!hasModel()) { log('Live: no model in memory. Train, or load a folder with header/myWeights.bin first.'); $('liveBanner').textContent = 'No model yet'; return; }
+  await startCam(); if (!state.stream) return;
+  state.live = true; $('btnLive').textContent = 'Stop live'; liveLoop();
+}
+async function liveLoop() {
+  const hv = $('liveHeat').getContext('2d');
+  while (state.live) {
+    try {
+      if (!hasModel()) { state.live = false; $('btnLive').textContent = 'Start live'; break; }
+      if (grabFrame()) {
+        const blob = await frameBlob(), x = rgbaToInput(await decodeBlob(blob)); forward(state.net, x);
+        const p = state.net.a.probs, top = argmax(p);
+        $('liveBanner').textContent = state.classes[top] + '  ' + (p[top] * 100).toFixed(0) + '%';
+        $('liveBars').innerHTML = barsHtml(p);
+        hv.imageSmoothingEnabled = false; hv.drawImage(capCanvas, 0, 0, 288, 288);
+        if (heat.overlay) drawHeatOn(hv, 288, state.net, heat.agg);
+      }
+    } catch (e) { log('Live error: ' + e.message); state.live = false; $('btnLive').textContent = 'Start live'; break; }
+    await sleep(60);
   }
 }
 
-// ██████████████████████████████████████████████████████████████████████████████
-// ██                                                                          ██
-// ██  PART 2: TRAINING FUNCTIONS (FORWARD/BACKWARD PASS, OPTIMIZER)           ██
-// ██                                                                          ██
-// ██  DEPENDENCIES (functions called from Part 0):                            ██
-// ██  - myAllocateMemory()                     [Part 0]                       ██
-// ██  - myLoadWeights()                        [Part 0]                       ██
-// ██  - mySaveWeights()                        [Part 0]                       ██
-// ██  - myLoadImageFromFile()                  [Part 0]                       ██
-// ██                                                                          ██
-// ██  VARIABLES USED (defined in Part 0):                                     ██
-// ██  - All neural network weight/gradient buffers                            ██
-// ██  - myClassLabels[NUM_CLASSES], LEARNING_RATE, BATCH_SIZE, TARGET_EPOCHS            ██
-// ██  - myTrainingData vector, myInputBuffer                                  ██
-// ██  - u8g2 (OLED display object)                                            ██
-// ██                                                                          ██
-// ██████████████████████████████████████████████████████████████████████████████
+// ---------- save ----------
+const configJson = () => JSON.stringify({ page: 'vision-cnn-sd-trainer ' + VERSION, firmware: 'FULL VISION ML firmware-v005', input_size: IN, input_channels: 3, conv1_filters: C1F, conv2_filters: C2F, kernel_size: 3, classes: state.classes, weights_file: 'header/myWeights.bin', weights_floats: totalFloats(state.classes.length), note: 'Class names are read by this page and by firmware-v003 at boot. NUM_CLASSES, INPUT_SIZE and filter counts are compile-time in the sketch.' }, null, 2);
 
-
-// ======================================================
-// FORWARD PASS
-// ======================================================
-void myForwardPass(float* input, float* logits) {
-  // Conv1: INPUT_SIZE x INPUT_SIZE x 3 -> CONV1_OUTPUT_SIZE x CONV1_OUTPUT_SIZE x CONV1_FILTERS
-  for(int f=0; f<CONV1_FILTERS; f++) {
-    int ob = f*CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE;
-    for(int y=0; y<CONV1_OUTPUT_SIZE; y++) {
-      for(int x=0; x<CONV1_OUTPUT_SIZE; x++) {
-        float sum = 0;
-        for(int ky=0; ky<3; ky++) {
-          for(int kx=0; kx<3; kx++) {
-            int inPos = ((y+ky)*INPUT_SIZE+(x+kx))*3;
-            int wPos = f*27 + ky*9 + kx*3;
-            sum += input[inPos]*myConv1_w[wPos] + 
-                   input[inPos+1]*myConv1_w[wPos+1] + 
-                   input[inPos+2]*myConv1_w[wPos+2];
-          }
-        }
-        myConv1_output[ob + y*CONV1_OUTPUT_SIZE + x] = leaky_relu(clip_value(sum + myConv1_b[f]));
-      }
-    }
-  }
-  
-  // Pool1: CONV1_OUTPUT_SIZE x CONV1_OUTPUT_SIZE -> POOL1_OUTPUT_SIZE x POOL1_OUTPUT_SIZE
-  for(int f=0; f<CONV1_FILTERS; f++) {
-    int ib=f*CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE, ob=f*POOL1_OUTPUT_SIZE*POOL1_OUTPUT_SIZE;
-    for(int y=0; y<POOL1_OUTPUT_SIZE; y++) {
-      for(int x=0; x<POOL1_OUTPUT_SIZE; x++) {
-        int iy=y*2, ix=x*2;
-        float maxVal = myConv1_output[ib + iy*CONV1_OUTPUT_SIZE + ix];
-        maxVal = max(maxVal, myConv1_output[ib + iy*CONV1_OUTPUT_SIZE + ix+1]);
-        maxVal = max(maxVal, myConv1_output[ib + (iy+1)*CONV1_OUTPUT_SIZE + ix]);
-        maxVal = max(maxVal, myConv1_output[ib + (iy+1)*CONV1_OUTPUT_SIZE + ix+1]);
-        myPool1_output[ob + y*POOL1_OUTPUT_SIZE + x] = maxVal;
-      }
-    }
-  }
-  
-  // Conv2: POOL1_OUTPUT_SIZE x POOL1_OUTPUT_SIZE x CONV1_FILTERS -> CONV2_OUTPUT_SIZE x CONV2_OUTPUT_SIZE x CONV2_FILTERS
-  for(int f=0; f<CONV2_FILTERS; f++) {
-    int ob=f*CONV2_OUTPUT_SIZE*CONV2_OUTPUT_SIZE;
-    for(int y=0; y<CONV2_OUTPUT_SIZE; y++) {
-      for(int x=0; x<CONV2_OUTPUT_SIZE; x++) {
-        float sum = 0;
-        for(int c=0; c<CONV1_FILTERS; c++) {
-          int ib=c*POOL1_OUTPUT_SIZE*POOL1_OUTPUT_SIZE;
-          for(int ky=0; ky<3; ky++) {
-            for(int kx=0; kx<3; kx++) {
-              sum += myPool1_output[ib + (y+ky)*POOL1_OUTPUT_SIZE + (x+kx)] * 
-                     myConv2_w[f*CONV2_IN_STRIDE + c*9 + ky*3 + kx];   // v45: was f*36
-            }
-          }
-        }
-        myConv2_output[ob + y*CONV2_OUTPUT_SIZE + x] = leaky_relu(clip_value(sum + myConv2_b[f]));
-      }
-    }
-  }
-  
-  // Dense layer
-  for(int c=0; c<NUM_CLASSES; c++) {
-    double sum = 0, comp = 0;
-    for(int i=0; i<FLATTENED_SIZE; i++) {
-      double term = myConv2_output[i] * myOutput_w[c*FLATTENED_SIZE + i];
-      double y = term - comp;
-      double t = sum + y;
-      comp = (t - sum) - y;
-      sum = t;
-    }
-    myDense_output[c] = clip_value((float)sum + myOutput_b[c], -50, 50);
-  }
-  
-  // Softmax
-  float mx = myDense_output[0];
-  for(int i=1; i<NUM_CLASSES; i++) mx = max(mx, myDense_output[i]);
-  float expSum = 0;
-  for(int i=0; i<NUM_CLASSES; i++) expSum += exp(myDense_output[i]-mx);
-  for(int i=0; i<NUM_CLASSES; i++) {
-    logits[i] = myDense_output[i];
-    myDense_output[i] = exp(myDense_output[i]-mx) / expSum;
-  }
-}
-
-// ======================================================
-// BACKWARD PASS
-// ======================================================
-void myBackwardDense(int label) {
-  // v43 FIX 1: myDense_grad is a per-image propagation signal — zero it fresh each image.
-  // myOutput_w_grad and myOutput_b_grad use += so all images in the batch accumulate.
-  // (Batch-level zeroing of those buffers is done once at the start of each batch loop.)
-  memset(myDense_grad, 0, FLATTENED_SIZE * sizeof(float));
-  for(int c=0; c<NUM_CLASSES; c++) {
-    float error = myDense_output[c] - (c==label ? 1.0f : 0.0f);
-    for(int i=0; i<FLATTENED_SIZE; i++) {
-      myOutput_w_grad[c*FLATTENED_SIZE+i] += error * myConv2_output[i];  // v43: += accumulates
-      myDense_grad[i] += error * myOutput_w[c*FLATTENED_SIZE+i];
-    }
-    myOutput_b_grad[c] += error;  // v43: += accumulates
-  }
-}
-
-void myBackwardConv2() {
-  for(int i=0; i<FLATTENED_SIZE; i++) {
-    myConv2_grad[i] = myDense_grad[i] * leaky_relu_deriv(myConv2_output[i]);
-  }
-  
-  // v43 FIX 1: myConv2_w_grad and myConv2_b_grad are weight accumulators — do NOT zero
-  // them here; the batch-level memset at the start of the batch loop handles that.
-  // myPool1_grad IS zeroed here because it is a per-image propagation signal.
-  memset(myPool1_grad, 0, POOL1_OUTPUT_SIZE*POOL1_OUTPUT_SIZE*CONV1_FILTERS*sizeof(float));
-  
-  for(int f=0; f<CONV2_FILTERS; f++) {
-    int ob=f*CONV2_OUTPUT_SIZE*CONV2_OUTPUT_SIZE;
-    for(int y=0; y<CONV2_OUTPUT_SIZE; y++) {
-      for(int x=0; x<CONV2_OUTPUT_SIZE; x++) {
-        float grad = myConv2_grad[ob+y*CONV2_OUTPUT_SIZE+x];
-        myConv2_b_grad[f] += grad;
-        for(int c=0; c<CONV1_FILTERS; c++) {
-          int ib=c*POOL1_OUTPUT_SIZE*POOL1_OUTPUT_SIZE;
-          for(int ky=0; ky<3; ky++) {
-            for(int kx=0; kx<3; kx++) {
-              int pi = ib+(y+ky)*POOL1_OUTPUT_SIZE+(x+kx);
-              int wi = f*CONV2_IN_STRIDE+c*9+ky*3+kx;   // v45: was f*36
-              myConv2_w_grad[wi] += grad * myPool1_output[pi];
-              myPool1_grad[pi] += grad * myConv2_w[wi];
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-void myBackwardPool1() {
-  memset(myConv1_grad, 0, CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE*CONV1_FILTERS*sizeof(float));
-  for(int f=0; f<CONV1_FILTERS; f++) {
-    int ib=f*CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE, ob=f*POOL1_OUTPUT_SIZE*POOL1_OUTPUT_SIZE;
-    for(int y=0; y<POOL1_OUTPUT_SIZE; y++) {
-      for(int x=0; x<POOL1_OUTPUT_SIZE; x++) {
-        int iy=y*2, ix=x*2;
-        float poolVal = myPool1_output[ob+y*POOL1_OUTPUT_SIZE+x];
-        float grad = myPool1_grad[ob+y*POOL1_OUTPUT_SIZE+x];
-        if(myConv1_output[ib+iy*CONV1_OUTPUT_SIZE+ix] == poolVal) myConv1_grad[ib+iy*CONV1_OUTPUT_SIZE+ix] += grad;
-        if(myConv1_output[ib+iy*CONV1_OUTPUT_SIZE+ix+1] == poolVal) myConv1_grad[ib+iy*CONV1_OUTPUT_SIZE+ix+1] += grad;
-        if(myConv1_output[ib+(iy+1)*CONV1_OUTPUT_SIZE+ix] == poolVal) myConv1_grad[ib+(iy+1)*CONV1_OUTPUT_SIZE+ix] += grad;
-        if(myConv1_output[ib+(iy+1)*CONV1_OUTPUT_SIZE+ix+1] == poolVal) myConv1_grad[ib+(iy+1)*CONV1_OUTPUT_SIZE+ix+1] += grad;
-      }
-    }
-  }
-}
-
-void myBackwardConv1() {
-  for(int i=0; i<CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE*CONV1_FILTERS; i++) {
-    myConv1_grad[i] *= leaky_relu_deriv(myConv1_output[i]);
-  }
-  
-  // v43 FIX 1: myConv1_w_grad and myConv1_b_grad are weight accumulators — do NOT zero
-  // them here; the batch-level memset at the start of the batch loop handles that.
-  
-  for(int f=0; f<CONV1_FILTERS; f++) {
-    int ob=f*CONV1_OUTPUT_SIZE*CONV1_OUTPUT_SIZE;
-    for(int y=0; y<CONV1_OUTPUT_SIZE; y++) {
-      for(int x=0; x<CONV1_OUTPUT_SIZE; x++) {
-        float grad = myConv1_grad[ob+y*CONV1_OUTPUT_SIZE+x];
-        myConv1_b_grad[f] += grad;
-        
-        for(int ky=0; ky<3; ky++) {
-          for(int kx=0; kx<3; kx++) {
-            int inPos = ((y+ky)*INPUT_SIZE+(x+kx))*3;
-            int wPos = f*27 + ky*9 + kx*3;
-            myConv1_w_grad[wPos] += grad * myInputBuffer[inPos];
-            myConv1_w_grad[wPos+1] += grad * myInputBuffer[inPos+1];
-            myConv1_w_grad[wPos+2] += grad * myInputBuffer[inPos+2];
-          }
-        }
-      }
-    }
-  }
-}
-
-// ======================================================
-// OPTIMIZER
-// ======================================================
-void myAdamUpdate(float* w, float* g, float* m, float* v, int size, int step) {
-  float b1=0.9f, b2=0.999f, eps=1e-6f;  // v43 FIX 2: eps 1e-8->1e-6f (float32 NaN prevention)
-  float lr_t = LEARNING_RATE * sqrt(1-pow(b2,step)) / (1-pow(b1,step));
-  for(int i=0; i<size; i++) {
-    m[i] = b1*m[i] + (1-b1)*g[i];
-    v[i] = b2*v[i] + (1-b2)*g[i]*g[i];
-    w[i] -= lr_t*m[i]/(sqrt(v[i])+eps);
-    w[i] = clip_value(w[i], -10, 10);
-  }
-}
-
-void myUpdateWeights(int step) {
-  myAdamUpdate(myConv1_w, myConv1_w_grad, myConv1_w_m, myConv1_w_v, CONV1_WEIGHTS, step);
-  myAdamUpdate(myConv1_b, myConv1_b_grad, myConv1_b_m, myConv1_b_v, CONV1_FILTERS, step);
-  myAdamUpdate(myConv2_w, myConv2_w_grad, myConv2_w_m, myConv2_w_v, CONV2_WEIGHTS, step);
-  myAdamUpdate(myConv2_b, myConv2_b_grad, myConv2_b_m, myConv2_b_v, CONV2_FILTERS, step);
-  myAdamUpdate(myOutput_w, myOutput_w_grad, myOutput_w_m, myOutput_w_v, OUTPUT_WEIGHTS, step);
-  myAdamUpdate(myOutput_b, myOutput_b_grad, myOutput_b_m, myOutput_b_v, NUM_CLASSES, step);
-}
-
-// ======================================================
-// TRAINING FUNCTION
-// ======================================================
-
-
-void myActionTrain() {
-  if (!mySDavailable) {
-    Serial.println("No SD card - cannot train");
-    u8g2.firstPage();
-    do { u8g2.drawStr(0, 15, "No SD card"); } while (u8g2.nextPage());
-    delay(2000);
-    myResetMenuState();
-    return;
-  }
-
-  Serial.println("\n>>> Training mode");
-  Serial.println("Instructions:");
-  Serial.println("  During training: 3+ taps = Save and exit");
-  Serial.println("  After completion: TAP = Train again, 3+ taps = Exit");
-  Serial.println("  Serial: 'T'=train again, 'L'=exit");
-  
-  myResetTouchState();  // Clear touch state when entering
-
-  u8g2.firstPage();
-  do {
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(0, 12, "TRAINING MODE");
-    u8g2.drawStr(0, 24, "Loading...");
-  } while (u8g2.nextPage());
-  
-  if (myLoadWeights()) {
-    Serial.println("Continuing from saved weights");
+async function saveWeights() {
+  const st = $('saveStatus');
+  if (!hasModel()) { st.textContent = 'No model to save. Train or load weights first.'; return; }
+  if (!weightsFinite(state.net)) { st.textContent = 'Refused: the model contains NaN or Infinity. Nothing was written.'; log(st.textContent); return; }
+  const bytes = serializeWeights(state.net);
+  if (bytes.byteLength !== totalFloats(state.classes.length) * 4) { st.textContent = 'Refused: weight size does not match the class count.'; return; }
+  if (state.mode === 'dir') {
+    try {
+      const hd = await state.root.getDirectoryHandle('header', { create: true });
+      let old = null; try { old = await (await hd.getFileHandle('myWeights.bin')).getFile(); } catch (e) { /* no existing file */ }
+      if (old) { await writeFile(hd, 'myWeights.bin.bak', old); log('Existing myWeights.bin copied to header/myWeights.bin.bak.'); }
+      await writeFile(hd, 'myWeights.bin', new Blob([bytes]));
+      await writeFile(hd, 'config.json', new Blob([configJson()]));
+      state.dirty = false; state.wStatus = 'loaded'; state.wNote = 'Saved header/myWeights.bin (' + bytes.byteLength + ' bytes).';
+      st.textContent = 'Saved header/myWeights.bin (' + bytes.byteLength + ' bytes) and header/config.json' + (old ? ', previous file kept as myWeights.bin.bak.' : '.');
+    } catch (e) { st.textContent = 'Save failed: ' + e.message; }
   } else {
-    //myAllocateMemory();
-    Serial.println("Starting fresh training");
+    state.dirty = false; st.textContent = 'Model kept for the zip. Press Save .zip to download it in the SD card layout.';
   }
+  log(st.textContent); renderSource(); renderModelInfo();
+}
 
-  while (true) {
-    // Load training data
-    myTrainingData.clear();
-    for(int i=0; i<NUM_CLASSES; i++) {
-      File root = SD.open("/images/" + myClassLabels[i]);
-      if (root) {
-        while(File file = root.openNextFile()) {
-          if(!file.isDirectory()) {
-            String fn = String(file.name());
-            if(fn.endsWith(".jpg") || fn.endsWith(".JPG")) {
-              myTrainingData.push_back({file.path(), i});
-            }
-          }
-          file.close();
-        }
-        root.close();
-      }
+async function buildZip() {
+  const files = [], enc = new TextEncoder();
+  state.classes.forEach(k => files.push({ name: 'images/' + k + '/', data: new Uint8Array(0) }));
+  if ($('zipImgs').checked) for (const s of state.samples) files.push({ name: 'images/' + state.classes[s.cls] + '/' + s.name, data: new Uint8Array(await s.blob.arrayBuffer()) });
+  if (hasModel() && weightsFinite(state.net)) files.push({ name: 'header/myWeights.bin', data: new Uint8Array(serializeWeights(state.net)) });
+  else log('No model in memory, so the zip has no myWeights.bin.');
+  files.push({ name: 'header/config.json', data: enc.encode(configJson()) });
+  return makeZip(files);
+}
+async function saveZip() {
+  if (!state.mode) { $('saveStatus').textContent = 'Load a data source first.'; return; }
+  $('saveStatus').textContent = 'Building zip ...';
+  const blob = await buildZip(), name = 'sd-card-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.zip';
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  if (state.mode === 'zip' && hasModel()) state.dirty = false;
+  $('saveStatus').textContent = 'Downloaded ' + name + ' (' + (blob.size / 1e6).toFixed(2) + ' MB).'; log($('saveStatus').textContent); renderModelInfo();
+}
+
+// ---------- model layout ----------
+function syncLayoutControls() {
+  const sel = $('inSize');
+  if (![...sel.options].some(o => +o.value === IN)) { const o = document.createElement('option'); o.value = IN; o.textContent = IN + ' x ' + IN; sel.appendChild(o); }
+  sel.value = IN; $('c1f').value = C1F; $('c2f').value = C2F;
+}
+function onLayoutChange() {
+  if (state.training) { syncLayoutControls(); return; }
+  const i = parseInt($('inSize').value), a = parseInt($('c1f').value), b = parseInt($('c2f').value);
+  if (!layoutValid(i, a, b)) { alert('Input size must be even, 16 to 128. Conv1 filters 1 to 16. Conv2 filters 1 to 32.'); syncLayoutControls(); return; }
+  if (i === IN && a === C1F && b === C2F) return;
+  if (state.net && state.dirty && !confirm('Changing the layout discards the unsaved model in memory. Continue?')) { syncLayoutControls(); return; }
+  setLayout(i, a, b); state.samples.forEach(s => s.input = null); resetModel(); state.hist = { loss: [], tacc: [], vacc: [] };
+  log('Layout set to input ' + IN + ', conv1 ' + C1F + ', conv2 ' + C2F + ' (' + FLAT + ' flattened, ' + (totalFloats(Math.max(1, state.classes.length)) * 4) + ' bytes of weights for ' + Math.max(1, state.classes.length) + ' classes). Model in memory discarded. Update INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS in the sketch.');
+  renderAll();
+}
+
+// ---------- burst capture ----------
+let bursting = false; const BURST_N = 10;
+const nextVideoFrame = () => new Promise(r => { const v = $('capVideo'), t = setTimeout(r, 250); if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(() => { clearTimeout(t); r(); }); else { clearTimeout(t); setTimeout(r, 34); } });
+async function burst() {
+  if (bursting) return;
+  if (!state.mode) { log('Load a data source first (section 1).'); return; }
+  const ci = parseInt($('capClass').value);
+  if (!state.classes[ci]) { log('Add or pick a class first.'); return; }
+  if (!state.stream) { log('Start the camera first.'); return; }
+  let dir = null;
+  if (state.mode === 'dir') { try { dir = await classDir(ci, true); } catch (e) { log('Cannot open the class folder: ' + e.message); return; } }
+  bursting = true;
+  const btn = $('btnBurst'), rec = $('rec'), wrap = $('capWrap'), got = []; let last = '';
+  const gap = Math.max(0, parseInt($('burstMs').value) || 0);
+  btn.classList.add('recording'); rec.classList.add('on');
+  try {
+    for (let i = 0; i < BURST_N; i++) {
+      btn.textContent = '\u25CF ' + (i + 1) + '/' + BURST_N;
+      await nextVideoFrame();
+      if (!grabFrame()) break;
+      wrap.classList.add('flash'); setTimeout(() => wrap.classList.remove('flash'), 60);
+      let name = 'img_' + Date.now() + '.jpg'; if (name === last) name = 'img_' + (Date.now() + 1) + '.jpg'; last = name;
+      got.push({ name, blob: await frameBlob() });
+      if (gap > 0) await sleep(gap);
     }
-    
-    if(myTrainingData.empty()) { 
-      u8g2.firstPage();
-      do { u8g2.drawStr(0, 20, "No Images!"); } while (u8g2.nextPage());
-      delay(2000);
-      myResetMenuState();
-      return; 
-    }
+  } finally { rec.classList.remove('on'); btn.classList.remove('recording'); btn.textContent = 'Saving ...'; }
+  let saved = 0;
+  for (const g of got) {
+    if (dir) { try { await writeFile(dir, g.name, g.blob); } catch (e) { log('Write failed: ' + e.message); break; } }
+    addSample(ci, g.name, g.blob); saved++;
+  }
+  state.evalStale = true; btn.textContent = 'Burst 10 (B)'; bursting = false;
+  log('Burst: saved ' + saved + ' of ' + BURST_N + ' images into ' + state.classes[ci] + ' (' + counts()[ci] + ' images).');
+  renderSource(); renderClasses(); renderBrowser(); updateSplitInfo();
+}
 
-    // v44: Sort by path for a deterministic split, then hold out the last
-    // VALIDATION_IMAGES images per class as a validation set.
-    std::sort(myTrainingData.begin(), myTrainingData.end(),
-              [](const TrainingItem& a, const TrainingItem& b){ return a.path < b.path; });
+// ---------- review mode ----------
+const rev = { list: [], i: 0, ci: 0, tok: 0 };
+function pruneMarks() { for (const s of [...state.marks]) if (!state.samples.includes(s)) state.marks.delete(s); }
+function revClassOptions() {
+  const c = counts(); $('revClass').innerHTML = state.classes.map((k, i) => '<option value="' + i + '">' + esc(k) + ' (' + c[i] + ')</option>').join('');
+  $('revClass').value = rev.ci;
+}
+function openReview() {
+  if (!state.samples.length) { log('Nothing to review: no images loaded.'); return; }
+  const c = counts(); if (!state.classes[rev.ci] || !c[rev.ci]) rev.ci = Math.max(0, c.findIndex(v => v > 0));
+  revClassOptions(); $('rev').showModal(); buildRev(0);
+}
+async function buildRev(start) {
+  const tok = ++rev.tok; rev.ci = parseInt($('revClass').value);
+  let list = state.samples.filter(s => s.cls === rev.ci).sort((a, b) => a.name < b.name ? -1 : 1);
+  if ($('revSusp').checked && hasModel()) {
+    for (const s of list) { forward(state.net, await getInput(s)); s._pt = state.net.a.probs[s.cls]; if (tok !== rev.tok) return; }
+    list = list.slice().sort((a, b) => a._pt - b._pt);
+  }
+  rev.list = list; rev.i = Math.min(start, Math.max(0, list.length - 1)); await showRev();
+}
+async function showRev() {
+  const tok = ++rev.tok, s = rev.list[rev.i]; pruneMarks();
+  $('revDelete').textContent = 'Delete marked (' + state.marks.size + ')'; $('revDelete').disabled = !state.marks.size;
+  if (!s) { $('revImg').removeAttribute('src'); $('revFrame').classList.remove('marked'); $('revCount').textContent = 'This class has no images.'; $('revPred').textContent = '-'; return; }
+  $('revImg').src = s.url; $('revFrame').classList.toggle('marked', state.marks.has(s));
+  $('revCount').textContent = state.classes[s.cls] + '  ' + (rev.i + 1) + ' / ' + rev.list.length + '  ' + s.name;
+  if (hasModel()) {
+    const x = await getInput(s); if (tok !== rev.tok) return;
+    forward(state.net, x); const p = state.net.a.probs, top = argmax(p), agree = top === s.cls;
+    $('revPred').innerHTML = 'Model says <b class="' + (agree ? 'ok' : 'bad') + '">' + esc(state.classes[top]) + ' ' + (p[top] * 100).toFixed(0) + '%</b>' + (agree ? '' : '<br>Labelled ' + esc(state.classes[s.cls]) + ' (' + (p[s.cls] * 100).toFixed(0) + '%). Look closely.');
+  } else $('revPred').textContent = 'No model in memory, so no prediction is shown.';
+}
+function revMove(d) {
+  if (!rev.list.length) return;
+  const n = rev.i + d;
+  if (n >= rev.list.length) { revNextClass(); return; }
+  rev.i = Math.max(0, n); showRev();
+}
+function revNextClass() {
+  const c = counts(), n = state.classes.length;
+  for (let k = 1; k <= n; k++) { const j = (rev.ci + k) % n; if (c[j] > 0) { $('revClass').value = j; buildRev(0); return; } }
+}
+function revToggle() {
+  const s = rev.list[rev.i]; if (!s) return;
+  if (state.marks.has(s)) state.marks.delete(s); else { state.marks.add(s); if (rev.i < rev.list.length - 1) rev.i++; }
+  showRev();
+}
+async function deleteMarked() {
+  pruneMarks(); const list = [...state.marks]; if (!list.length) return;
+  const per = {}; list.forEach(s => per[state.classes[s.cls]] = (per[state.classes[s.cls]] || 0) + 1);
+  if (!confirm('Delete ' + list.length + ' marked images (' + Object.entries(per).map(([k, v]) => k + ' ' + v).join(', ') + ') from the ' + (state.mode === 'dir' ? 'SD card folder' : 'zip data') + '? This cannot be undone.')) return;
+  let del = 0;
+  for (const s of list) {
+    if (state.mode === 'dir') { try { await (await classDir(s.cls, false)).removeEntry(s.name); } catch (e) { log('Delete failed for ' + s.name + ': ' + e.message); continue; } }
+    URL.revokeObjectURL(s.url); state.samples = state.samples.filter(x => x !== s); state.wrong = state.wrong.filter(w => w.s !== s); state.marks.delete(s); del++;
+  }
+  state.evalStale = true; log('Review: deleted ' + del + ' of ' + list.length + ' marked images.');
+  renderSource(); renderClasses(); renderBrowser(); updateSplitInfo(); renderEval(); revClassOptions(); await buildRev(rev.i);
+}
 
-    std::vector<TrainingItem> myValidationData;
-    if (VALIDATION_IMAGES > 0) {
-      int counts[NUM_CLASSES] = {};
-      for (auto& item : myTrainingData) counts[item.label]++;
-      int skip[NUM_CLASSES];
-      for (int c = 0; c < NUM_CLASSES; c++) skip[c] = min(VALIDATION_IMAGES, counts[c]);
+// ---------- config.json only ----------
+async function saveConfig() {
+  const st = $('saveStatus');
+  if (!state.classes.length) { st.textContent = 'No classes to write.'; return; }
+  if (state.mode !== 'dir') { st.textContent = 'Zip mode: config.json is included in Save .zip.'; return; }
+  try {
+    const hd = await state.root.getDirectoryHandle('header', { create: true });
+    await writeFile(hd, 'config.json', new Blob([configJson()]));
+    st.textContent = 'Wrote header/config.json with ' + state.classes.length + ' classes: ' + state.classes.join(', ') + '.';
+  } catch (e) { st.textContent = 'Write failed: ' + e.message; }
+  log(st.textContent);
+}
 
-      std::vector<TrainingItem> trainOnly;
-      int seen[NUM_CLASSES] = {};
-      for (int i = (int)myTrainingData.size() - 1; i >= 0; i--) {
-        int c = myTrainingData[i].label;
-        if (seen[c] < skip[c]) {
-          myValidationData.push_back(myTrainingData[i]);
-          seen[c]++;
-        } else {
-          trainOnly.push_back(myTrainingData[i]);
-        }
-      }
-      myTrainingData = trainOnly;
-      Serial.printf("Val: %d images  Train: %d images\n",
-                    (int)myValidationData.size(), (int)myTrainingData.size());
-    }
+// ---------- serial monitor (Web Serial) ----------
+const ser = { port: null, reader: null, writer: null, readDone: null, writeDone: null };
+function serAppend(t) {
+  const o = $('serOut'); o.value += t.replace(/\r/g, '');
+  if (o.value.length > 60000) o.value = o.value.slice(-40000);
+  o.scrollTop = o.scrollHeight;
+}
+function serUi(on) {
+  $('btnSerial').textContent = on ? 'Disconnect' : 'Connect';
+  $('serSend').disabled = !on; $('serIn').disabled = !on;
+  $('serStatus').textContent = on ? 'Connected at 115200 baud.' : 'Not connected.';
+}
+async function serDisconnect() {
+  const p = ser.port; if (!p) return; ser.port = null;
+  clearInterval(serBeat); serBeat = null; serPend = '';
+  try { await ser.writer.write('d'); } catch (e) { /* port already gone */ }
+  try { await ser.reader.cancel(); } catch (e) { /* already closed */ }
+  try { await ser.writer.close(); } catch (e) { /* already closed */ }
+  try { await ser.readDone; await ser.writeDone; } catch (e) { /* ignore */ }
+  try { await p.close(); } catch (e) { /* ignore */ }
+  ser.reader = ser.writer = null; serUi(false); log('Serial disconnected.');
+}
+async function serConnect() {
+  if (ser.port) { await serDisconnect(); return; }
+  let port;
+  try { port = await navigator.serial.requestPort(); await port.open({ baudRate: 115200 }); }
+  catch (e) { if (e.name !== 'NotFoundError') log('Serial: ' + e.message); return; }
+  ser.port = port;
+  const dec = new TextDecoderStream(); ser.readDone = port.readable.pipeTo(dec.writable).catch(() => {}); ser.reader = dec.readable.getReader();
+  const enc = new TextEncoderStream(); ser.writeDone = enc.readable.pipeTo(port.writable).catch(() => {}); ser.writer = enc.writable.getWriter();
+  serUi(true); log('Serial connected.');
+  serDebugSync(); serBeat = setInterval(serDebugSync, 5000); setTimeout(() => ser.writer && ser.writer.write('@info\n').catch(() => {}), 2500);
+  const rd = ser.reader;
+  (async () => { try { for (;;) { const { value, done } = await rd.read(); if (done) break; if (value) serFeed(value); } } catch (e) { /* closed */ } if (ser.port === port) serDisconnect(); })();
+}
+async function serSend() {
+  if (!ser.writer) return;
+  const t = $('serIn').value;
+  try { await ser.writer.write(t + '\n'); serAppend('> ' + t + '\n'); } catch (e) { log('Serial send failed: ' + e.message); }
+  $('serIn').value = ''; $('serIn').focus();
+}
 
-    int total = myTrainingData.size();
-    int batchesPerEpoch = (total + BATCH_SIZE - 1) / BATCH_SIZE;
-    int totalBatches = TARGET_EPOCHS * batchesPerEpoch;
-    
-    Serial.printf("Training: %d images, %d batches\n", total, totalBatches);
-    
-    // Training loop
-    std::vector<int> indices;
-    for(int i=0; i<total; i++) indices.push_back(i);
-    
-    float runningLoss = 0;
-    int lossCount = 0;
-    
-    for(int batch=0; batch<totalBatches; batch++) {
-      // Check for exit during training
-      if (Serial.available()) {
-        char c = Serial.read();
-        // v43 FIX 4: accept 'l'/'L' as well as 'x'/'X' — consistent with all other modes
-        if (c == 'x' || c == 'X' || c == 'l' || c == 'L') {
-          Serial.println("Stopping training...");
-          mySaveWeights();
-          myWeightsTrained = true; 
-          myResetMenuState();
-          return;
-        }
+// ---------- device debug frames (firmware-v005) ----------
+let serPend = '', serBeat = null;
+const dev = { f: null, tok: 0 };
+function serDebugSync() { if (ser.writer) ser.writer.write($('serDebug').checked ? 'D' : 'd').catch(() => {}); }
+const b64ToBytes = s => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+// Text goes to the monitor; complete lines that start with '@' are debug frames.
+function serFeed(chunk) {
+  serPend += chunk;
+  let i;
+  while ((i = serPend.indexOf('\n')) >= 0) {
+    const line = serPend.slice(0, i); serPend = serPend.slice(i + 1);
+    if (line.startsWith('@LORA')) loraLine(line.trim()); else if (line.charCodeAt(0) === 64) serFrame(line.trim()); else serAppend(line.replace(/\r$/, '') + '\n');
+  }
+  if (serPend && serPend.charCodeAt(0) !== 64) { serAppend(serPend); serPend = ''; }
+}
+function serFrame(line) {
+  const f = line.split(' ');
+  if (f[0] !== '@F' || f.length < 11) { serAppend('[incomplete debug frame ignored]\n'); return; }
+  try {
+    const nums = s => s === '-' ? null : s.split(',').map(Number);
+    const fr = { kind: f[1], n: f[2], pred: parseInt(f[3]), probs: nums(f[4]), logits: nums(f[5]), layout: f[6], ctr: nums(f[7]), side: parseInt(f[8]), heat: f[9] === '-' ? null : b64ToBytes(f[9]), jpg: b64ToBytes(f[10]) };
+    fr.blob = new Blob([fr.jpg], { type: 'image/jpeg' });
+    if (dev.f) URL.revokeObjectURL(dev.f.url);
+    fr.url = URL.createObjectURL(fr.blob); dev.f = fr; renderDev();
+  } catch (e) { serAppend('[debug frame error: ' + e.message + ']\n'); }
+}
+async function renderDev() {
+  const fr = dev.f; if (!fr) return;
+  const tok = ++dev.tok, cv = $('devCanvas'), ctx = cv.getContext('2d');
+  const img = await loadImg(fr.url); if (tok !== dev.tok) return;
+  ctx.imageSmoothingEnabled = false; ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  if (fr.heat && heat.overlay && fr.heat.length === fr.side * fr.side) paintHeat(ctx, cv.width, i => fr.heat[i] / 255, fr.side);
+  const label = { I: 'inference frame', C: 'image just saved', P: 'live preview while collecting' }[fr.kind] || fr.kind;
+  let h = '<div><b>Device ' + label + '</b> #' + esc(fr.n) + ', layout ' + esc(fr.layout) + ', JPEG ' + fr.jpg.length + ' bytes</div>', bars = '';
+  if (fr.probs) {
+    const top = argmax(fr.probs), name = i => state.classes[i] !== undefined && fr.probs.length === state.classes.length ? state.classes[i] : 'class ' + i;
+    h += '<div>Device says <b>' + esc(name(top)) + ' ' + (fr.probs[top] * 100).toFixed(1) + '%</b></div>';
+    if (fr.probs.length === state.classes.length) bars = barsHtml(fr.probs);
+    if (!hasModel()) h += '<div class="note">No model in memory, so nothing to compare with. Train or load weights.</div>';
+    else if (fr.layout !== layoutKey() || fr.probs.length !== state.classes.length) h += '<div class="warn">Device layout ' + esc(fr.layout) + ' with ' + fr.probs.length + ' classes differs from this page (' + esc(layoutKey()) + ', ' + state.classes.length + ' classes). No comparison.</div>';
+    else {
+      const x = rgbaToInput(await decodeBlob(fr.blob)); if (tok !== dev.tok) return;
+      forward(state.net, x); const p = state.net.a.probs, bt = argmax(p);
+      let md = 0; for (let i = 0; i < p.length; i++) md = Math.max(md, Math.abs(p[i] - fr.probs[i]) * 100);
+      h += '<div>Page model on the same JPEG says <b>' + esc(state.classes[bt]) + ' ' + (p[bt] * 100).toFixed(1) + '%</b>. Largest probability difference <b class="' + (md < 1 ? 'ok' : md < 5 ? 'warn' : 'bad') + '">' + md.toFixed(2) + ' points</b>.</div>';
+      const c0 = ((IN / 2) * IN + IN / 2) * 3;
+      if (fr.ctr) {
+        const dc = Math.max(Math.abs(x[c0] - fr.ctr[0]), Math.abs(x[c0 + 1] - fr.ctr[1]), Math.abs(x[c0 + 2] - fr.ctr[2]));
+        h += '<div>Centre input pixel: device ' + fr.ctr.map(v => v.toFixed(3)).join(' ') + ', page ' + [x[c0], x[c0 + 1], x[c0 + 2]].map(v => v.toFixed(3)).join(' ') + '.</div>';
+        if (md >= 5) h += '<div class="' + (dc > 0.03 ? 'bad' : 'warn') + '">' + (dc > 0.03 ? 'The model inputs differ: check flip, resize or JPEG decode.' : 'Inputs match, so the weights on the device are probably not the ones in this page (old myWeights.bin, or a different class order).') + '</div>';
       }
-      
-      // Touch input during training - check in background
-      myCheckTouchBackground();  // Update touch state without blocking
-      if (myPeekTouchAction() == 2) {
-        myCheckTouchInput();  // Consume the action
-        Serial.println("Long press - stopping training");
-        mySaveWeights();
-        myWeightsTrained = true; 
-        myResetMenuState();
-        return;
-      }
-      
-      // Shuffle at epoch start
-      if(batch % batchesPerEpoch == 0) {
-        int epoch = batch/batchesPerEpoch + 1;
-        Serial.printf("\n--- Epoch %d/%d ---\n", epoch, TARGET_EPOCHS);
-        for(int i=total-1; i>0; i--) {
-          int j = random(i+1);
-          int tmp = indices[i];
-          indices[i] = indices[j];
-          indices[j] = tmp;
-        }
-      }
-      
-      int batchStart = (batch % batchesPerEpoch) * BATCH_SIZE;
-      int batchEnd = min(batchStart + BATCH_SIZE, total);
-      
-      float batchLoss = 0;
-      int correctCount = 0;
-      
-      // v43 FIX 1: Zero ALL weight gradient buffers once per batch before accumulating.
-      // This replaces the per-function memsets that were incorrectly resetting grads
-      // between images mid-batch in v42.
-      memset(myConv1_w_grad,  0, CONV1_WEIGHTS  * sizeof(float));
-      memset(myConv1_b_grad,  0, CONV1_FILTERS  * sizeof(float));
-      memset(myConv2_w_grad,  0, CONV2_WEIGHTS  * sizeof(float));
-      memset(myConv2_b_grad,  0, CONV2_FILTERS  * sizeof(float));
-      memset(myOutput_w_grad, 0, OUTPUT_WEIGHTS * sizeof(float));
-      memset(myOutput_b_grad, 0, NUM_CLASSES    * sizeof(float));
-      
-      // Train on batch
-      for(int i=batchStart; i<batchEnd; i++) {
-        int idx = indices[i];
-        TrainingItem& img = myTrainingData[idx];
-        
-        if(!myLoadImageFromFile(img.path.c_str(), myInputBuffer)) continue;
-        
-        float logits[NUM_CLASSES];
-        myForwardPass(myInputBuffer, logits);
-        
-        float loss = -log(max(myDense_output[img.label], 1e-7f));
-        batchLoss += loss;
-        
-        int pred = 0;
-        for(int j=1; j<NUM_CLASSES; j++) if(myDense_output[j] > myDense_output[pred]) pred = j;
-        if(pred == img.label) correctCount++;
-        
-        myBackwardDense(img.label);
-        myBackwardConv2();
-        myBackwardPool1();
-        myBackwardConv1();
-        
-        // Update touch state during heavy computation
-        // v43 FIX 5: also peek for action here so a tap exits within one image,
-        // not at the end of the entire batch (which can be a 5-15 second wait)
-        if (i % 3 == 0) {
-          myCheckTouchBackground();
-          if (myPeekTouchAction() == 2) {
-            myCheckTouchInput();  // consume
-            Serial.println("Long press - stopping training");
-            mySaveWeights();
-            myWeightsTrained = true; 
-            myResetMenuState();
-            return;
-          }
-          if (Serial.available()) {
-            char c = Serial.read();
-            if (c == 'x' || c == 'X' || c == 'l' || c == 'L') {
-              Serial.println("Stopping training...");
-              mySaveWeights();
-              myWeightsTrained = true; 
-              myResetMenuState();
-              return;
-            }
-          }
-        }
-      }
-      
-      myUpdateWeights(batch+1);
-      
-      float avgLoss = batchLoss / (batchEnd - batchStart);
-      float batchAcc = (float)correctCount / (batchEnd - batchStart);
-      runningLoss += avgLoss;
-      lossCount++;
-      
-      // Update display
-      if((batch+1) % 5 == 0) {
-        float displayLoss = runningLoss / lossCount;
-        u8g2.firstPage();
-        do {
-          u8g2.setFont(u8g2_font_5x7_tf);   // _6x10_tf
-          u8g2.setCursor(0, 12); u8g2.print("Training...");
-          u8g2.setCursor(0, 24); 
-          u8g2.print("B:"); u8g2.print(batch+1); 
-          u8g2.print("/"); u8g2.print(totalBatches);
-          u8g2.setCursor(0, 36); 
-          u8g2.print("L:"); u8g2.print(displayLoss, 3);
-          u8g2.print(" A:"); u8g2.print((int)(batchAcc*100)); u8g2.print("%");
-        } while (u8g2.nextPage());
-        runningLoss = 0;
-        lossCount = 0;
-      }
-      
-      if((batch+1) % 10 == 0) {
-        Serial.printf("Batch %d/%d - Loss: %.4f - Acc: %.1f%%\n", 
-                     batch+1, totalBatches, avgLoss, batchAcc*100);
-      }
-    }
-    
-    Serial.println("\n--- Training Complete ---");
-
-    // v44: Run forward pass on held-out validation images and report accuracy.
-    if (!myValidationData.empty()) {
-      int valCorrect = 0;
-      int valCount   = 0;
-      for (auto& vitem : myValidationData) {
-        if (!myLoadImageFromFile(vitem.path.c_str(), myInputBuffer)) continue;
-        float logits[NUM_CLASSES];
-        myForwardPass(myInputBuffer, logits);
-        int pred = 0;
-        for (int j = 1; j < NUM_CLASSES; j++)
-          if (myDense_output[j] > myDense_output[pred]) pred = j;
-        if (pred == vitem.label) valCorrect++;
-        valCount++;
-      }
-      if (valCount > 0) {
-        Serial.printf("Validation Accuracy: %.1f%%  (%d/%d correct)\n",
-                      100.0f * valCorrect / valCount, valCorrect, valCount);
-      }
-    }
-
-    mySaveWeights();
-    myWeightsTrained = true;
-
-    u8g2.firstPage();
-    do { 
-      u8g2.drawStr(0, 12, "DONE!");
-      u8g2.drawStr(0, 24, "Tap:Again");
-      u8g2.drawStr(0, 36, "3+Taps:Exit");
-    } while (u8g2.nextPage());
-
-    myResetTouchState();
-    
-    Serial.println("Waiting for input...");
-    Serial.println("  Serial: T=train again  L=exit");
-    Serial.println("  Touch:  1-2 taps=train again  3+taps=exit");
-    while (true) {
-      if (Serial.available()) {
-        char c = Serial.read();
-        // v43 FIX: added l/L as exit — was missing here (only x/X worked before)
-        if (c == 'x' || c == 'X' || c == 'l' || c == 'L') {
-          myResetMenuState();
-          return;
-        } else if (c == 't' || c == 'T') {
-          break;
-        }
-      }
-      int touchAction = myCheckTouchInput();
-      if (touchAction == 2) {
-        myResetMenuState();
-        return;
-      } else if (touchAction == 1) {
-        Serial.println("Starting new training cycle");
-        break;
-      }
-      delay(10);
     }
   }
+  $('devInfo').innerHTML = h; $('devBars').innerHTML = bars;
 }
 
 
-// ██████████████████████████████████████████████████████████████████████████████
-// ██                                                                          ██
-// ██  PART 3: INFERENCE FUNCTION - OPTIMIZED                                  ██
-// ██                                                                          ██
-// ██  DEPENDENCIES (functions called from Part 0):                            ██
-// ██  - myLoadWeights()    // Weights loaded in setup()                       ██
-// ██  - myForwardPass()                        [Part 2]                       ██
-// ██  - myRgbBuffer (global, allocated in setup)                              ██
-// ██                                                                          ██
-// ██  VARIABLES USED (defined in Part 0):                                     ██
-// ██  - myInputBuffer, myDense_output (probabilities)                         ██
-// ██  - myClassLabels[NUM_CLASSES], myThresholdPress                                    ██
-// ██  - u8g2 (OLED display object)                                            ██
-// ██                                                                          ██
-// ██████████████████████████████████████████████████████████████████████████████
-
-
-void myActionInfer() {
-  // Guard: refuse to run if no trained weights are loaded
-  if (!myWeightsTrained) {
-    Serial.println("ERROR: No trained weights! Please run menu item 4 (Train) first.");
-    u8g2.firstPage();
-    do {
-      u8g2.setFont(u8g2_font_6x10_tf);
-      u8g2.drawStr(0, 12, "No weights!");
-      u8g2.drawStr(0, 24, "Train first");
-      u8g2.drawStr(0, 36, "(menu item 4)");
-    } while (u8g2.nextPage());
-    delay(3000);
-    myResetMenuState();
-    return;
+// ---------- LoRa network (v004: readable event log, messages, settings buttons) ----------
+const lora = { reports: [], devs: {}, classes: null, log: [], logDirty: true, beepAt: 0 };
+const loraWinMs = () => Math.min(60, Math.max(1, parseFloat($('loraWin').value) || 3)) * 60000;
+const loraCls = i => (lora.classes && lora.classes[i]) || state.classes[i] || ('class ' + i);
+const p2 = n => String(n).padStart(2, '0');
+const stamp = t => { const d = new Date(t); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()); };
+function loraCmd(t) {
+  if (!ser.writer) { log('Connect the serial monitor first (section 8).'); return; }
+  ser.writer.write(t + '\n').then(() => { serAppend('> ' + t + '\n'); setTimeout(() => ser.writer && ser.writer.write('@info\n').catch(() => {}), 500); }).catch(e => log('Serial send failed: ' + e.message));
+}
+function loraBeep() {
+  if (!$('loraBeep').checked || Date.now() - lora.beepAt < 5000) return; lora.beepAt = Date.now();
+  try { const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator(), g = a.createGain(); o.frequency.value = 880; g.gain.value = 0.15; o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + 0.18); } catch (e) { /* no audio */ }
+}
+function loraSumText(seq, period, frames, counts) {
+  const unsure = frames - counts.reduce((a, b) => a + b, 0);
+  return 'summary #' + seq + ', ' + period + ' s window, ' + frames + ' frames: ' + counts.map((v, k) => loraCls(k) + ' ' + v).join(', ') + (unsure > 0 ? ', unsure ' + unsure + ' (below the confidence limit)' : '');
+}
+function loraLine(line) {
+  if (line.startsWith('@LORA-MSG')) {
+    const m = /^@LORA-MSG (\S+) (\S+) (.*)$/.exec(line); if (!m) return;
+    const self = m[1] === 'self';
+    lora.log.unshift({ t: Date.now(), kind: 'msg', self, rssi: self ? null : +m[1], snr: self ? null : +m[2], text: m[3] });
+    if (lora.log.length > 300) lora.log.length = 300;
+    lora.logDirty = true; loraRender(); return;
   }
-  Serial.println("\n>>> Inference mode - OPTIMIZED");
-  Serial.println("Instructions:");
-  Serial.println("  T or L exit to menu");
-
-  
-  myResetTouchState();  // Clear touch state when entering
-  
-  // Weights already loaded in setup() - just verify PSRAM is ready
-  if (!myInputBuffer || !myDense_output) {
-    Serial.println("ERROR: Memory not allocated - cannot infer");
-    u8g2.firstPage();
-    do { u8g2.drawStr(0, 15, "NOT READY!"); } while (u8g2.nextPage());
-    delay(2000);
-    myResetMenuState();
-    return;
+  if (line.startsWith('@LORA-INFO')) {
+    const m = /classes=(.*)$/.exec(line); if (m && m[1]) lora.classes = m[1].split(',');
+    const kv = {}; line.replace(/(\w+)=([^\s]+)/g, (a, k, v) => kv[k] = v);
+    $('loraInfo').textContent = 'Connected device: ' + kv.name + ', channel ' + kv.ch + ' (' + (915 + kv.ch * 0.1).toFixed(1) + ' MHz), report every ' + kv.report + ' s, min confidence ' + kv.conf + '%, radio ' + kv.radio + ', inference after power-up: ' + (kv.auto === '1' ? 'starts by itself' : kv.auto === '0' ? 'waits in the menu' : 'unknown (older firmware)') + '. Classes: ' + (lora.classes || []).join(', ');
+    loraRender(); return;
   }
-  
-  // Pre-compute resize lookup tables (done once)
-  static int sy_lookup[INPUT_SIZE];
-  static int sx_lookup[INPUT_SIZE];
-  static bool lookup_initialized = false;
-  
-  if (!lookup_initialized) {
-    for(int i=0; i<INPUT_SIZE; i++) {
-      sy_lookup[i] = min((int)((i+0.5)*240.0/INPUT_SIZE), 239);
-      sx_lookup[i] = min((int)((i+0.5)*240.0/INPUT_SIZE), 239);
-    }
-    lookup_initialized = true;
-    Serial.println("Resize lookup tables initialized");
+  const f = line.split(' '); if (f[0] !== '@LORA' || f.length < 4) return;
+  const pk = f.slice(3).join(' ').split(','); if (pk[0] !== 'S' || pk.length < 6) return;
+  const name = pk[1], seq = +pk[2], period = +pk[3], frames = +pk[4], counts = pk.slice(5).map(Number);
+  if (!name || [seq, period, frames].concat(counts).some(v => !Number.isFinite(v))) return;
+  const now = Date.now(), self = f[1] === 'self';
+  const d = lora.devs[name] || (lora.devs[name] = { name, last: 0, seq: -1, missed: 0, reboots: 0, n: 0, rssi: null, snr: null, period, self });
+  if (d.seq >= 0) { if (seq > d.seq + 1) d.missed += seq - d.seq - 1; else if (seq <= d.seq) d.reboots++; }
+  Object.assign(d, { seq, last: now, period, self, rep: { seq, period, frames, counts } }); d.n++;
+  if (!self) { d.rssi = +f[1]; d.snr = +f[2]; }
+  lora.reports.push({ t: now, name, seq, period, frames, counts });
+  lora.reports = lora.reports.filter(r => now - r.t <= 3600000);
+  const hot = counts.slice(1).map((v, i) => v > 0 ? loraCls(i + 1) + ' \u00d7' + v : '').filter(Boolean);
+  lora.log.unshift({ t: now, kind: 'sum', name, self, rssi: self ? null : +f[1], snr: self ? null : +f[2], hot: hot.length > 0, counts, seq, period, frames }); if (lora.log.length > 300) lora.log.length = 300;
+  lora.logDirty = true; if (hot.length) loraBeep();
+  loraRender();
+}
+function loraRender() {
+  const now = Date.now(), win = loraWinMs(), rs = lora.reports.filter(r => now - r.t <= win), tot = [], who = [];
+  rs.forEach(r => r.counts.forEach((v, k) => { tot[k] = (tot[k] || 0) + v; if (v > 0 && k > 0) { who[k] = who[k] || {}; who[k][r.name] = (who[k][r.name] || 0) + v; } }));
+  const act = []; for (let k = 1; k < tot.length; k++) if (tot[k] > 0) act.push(k);
+  const b = $('loraBanner'), mins = win / 60000;
+  if (!Object.keys(lora.devs).length) { b.className = 'lorabanner wait'; }
+  else if (!act.length) { b.className = 'lorabanner'; b.innerHTML = '<div class="big">' + stamp(now) + '</div>'; }
+  else {
+    b.className = 'lorabanner alert';
+    const last = rs.filter(r => r.counts.slice(1).some(v => v > 0)).pop();
+    b.innerHTML = '<div class="big">' + act.map(k => esc(loraCls(k)) + ' \u00d7' + tot[k]).join(', ') + '</div><div class="note">Last ' + mins + ' min, latest ' + (last ? stamp(last.t) : '') + '</div>';
   }
-  
-  // Timing arrays for 10-frame batches
-  unsigned long frameTimes[10];
-  int frameIndex = 0;
-  int pred = 0;  // Store prediction outside loop for printing
-  unsigned long myInferCount = 0;   // v47: frame number for the debug frames
-  
-  while (true) {
-    unsigned long frameStart = millis();
-    myLoraService();   // LoRa v001: receive, report, transmit
-    
-    // Serial input check (fast, every frame)
-    if (Serial.available()) {
-      char c = Serial.read();
-      if (myHandleDebugChar(c)) {
-        // handled: web page debug heartbeat
-      } else if (c == 't' || c == 'T' || c == 'l' || c == 'L') {
-        myResetMenuState();
-        return;
-      }
-    }
-    
-    // Get camera frame
-    camera_fb_t * fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("Camera frame failed - retrying");
-      delay(10);
-      continue;
-    }
-    
-    // Check if RGB buffer is allocated
-    if (!myRgbBuffer) {
-      Serial.println("ERROR: myRgbBuffer not allocated!");
-      esp_camera_fb_return(fb);
-      delay(10);
-      continue;
-    }
-    
-    // Convert JPEG to RGB (reusing pre-allocated buffer)
-    if (fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, myRgbBuffer)) {
-      
-      // Optimized resize using lookup tables
-      for(int y=0; y<INPUT_SIZE; y++) {
-        int sy = sy_lookup[y];
-        int sy_offset = sy * 240;
-        int dst_y_offset = y * INPUT_SIZE;
-        
-        for(int x=0; x<INPUT_SIZE; x++) {
-          int srcIdx = (sy_offset + sx_lookup[x]) * 3;
-          int dstIdx = (dst_y_offset + x) * 3;
-          myInputBuffer[dstIdx] = myRgbBuffer[srcIdx] * 0.003921569f;      // /255.0
-          myInputBuffer[dstIdx+1] = myRgbBuffer[srcIdx+1] * 0.003921569f;
-          myInputBuffer[dstIdx+2] = myRgbBuffer[srcIdx+2] * 0.003921569f;
-        }
-      }
-      
-      // Run inference
-      float myLogits[NUM_CLASSES];
-      myForwardPass(myInputBuffer, myLogits);
-      
-      myInferCount++;
-      // Find prediction
-      pred = 0;
-      for(int i=1; i<NUM_CLASSES; i++) {
-        if(myDense_output[i] > myDense_output[pred]) pred = i;
-      }
-
-      myLoraCount(pred, myDense_output[pred]);   // LoRa v001
-
-      // Every 10th frame: draw live image + label overlay on OLED.
-      // Done HERE while myRgbBuffer is still valid (before fb is returned).
-      if (frameIndex == 9) {
-        myDebugSendFrame('I', (int)myInferCount, fb, pred, myLogits);   // v47: every 10th inference to the web page
-        int oW = u8g2.getDisplayWidth();
-        int oH = u8g2.getDisplayHeight();
-        int scX = 240 / oW;
-        int scY = 240 / oH;
-        u8g2.firstPage();
-        do {
-          // Draw downsampled camera image
-          for (int ox = 0; ox < oW; ox++) {
-            for (int oy = 0; oy < oH; oy++) {
-              int pi = ((oy * scY) * 240 + (ox * scX)) * 3;
-              uint8_t bright = (myRgbBuffer[pi] + myRgbBuffer[pi+1] + myRgbBuffer[pi+2]) / 3;
-              if (bright > 100) u8g2.drawPixel(ox, oy);
-            }
-          }
-          // Label overlay bar at bottom
-          u8g2.setFont(u8g2_font_5x7_tf);
-          u8g2.setColorIndex(0);
-          u8g2.drawBox(0, oH - 9, oW, 9);
-          u8g2.setColorIndex(1);
-          char buf[20];
-          snprintf(buf, sizeof(buf), "%s %d%%",
-                   myClassLabels[pred].c_str(),
-                   (int)(myDense_output[pred] * 100));
-          u8g2.drawStr(1, oH - 1, buf);
-        } while (u8g2.nextPage());
-      }
-    }
-    
-    esp_camera_fb_return(fb);
-    
-    // Record frame timing
-    frameTimes[frameIndex] = millis() - frameStart;
-    float fps2 = 1000.0 / frameTimes[frameIndex];
-    Serial.printf("Frame %d: %lu ms (%.1f FPS) ", frameIndex+1, frameTimes[frameIndex], fps2);
-    frameIndex++;
-    Serial.printf("Current Pred: %s (%.1f%%) | All:", 
-                   myClassLabels[pred].c_str(), myDense_output[pred]*100);
-    for(int i=0; i<NUM_CLASSES; i++) Serial.printf(" %.0f%%", myDense_output[i]*100);
-    Serial.println();
-   
-    // Every 10th frame: touch exit check (OLED image already drawn above before fb return)
-    if (frameIndex >= 10) {
-      int touchVal = myReadTouch();
-      if (MY_TOUCH_EXIT_IN_INFER && touchVal > myThresholdPress) {
-        Serial.println("Touch detected - exiting inference");
-        delay(200);
-        myResetMenuState();
-        return;
-      }
-      frameIndex = 0;
-    }
+  $('loraSum').innerHTML = act.length ? '<table><thead><tr><th>Class</th><th>Frames in last ' + mins + ' min</th><th>Devices</th></tr></thead><tbody>' +
+    act.map(k => '<tr><td><b>' + esc(loraCls(k)) + '</b></td><td>' + tot[k] + '</td><td>' + Object.entries(who[k]).map(([n, v]) => '<span class="chip hot">' + esc(n) + ' ' + v + '</span>').join('') + '</td></tr>').join('') + '</tbody></table>'
+    : '<p class="note">' + (rs.length ? 'Only class 0 in the last ' + mins + ' minutes.' : 'No reports in the last ' + mins + ' minutes.') + '</p>';
+  const names = Object.keys(lora.devs).sort();
+  $('loraDevs').innerHTML = names.length ? '<table><thead><tr><th>Device</th><th>Heard</th><th>Signal</th><th>Reports</th><th>Missed</th><th>Last ' + mins + ' min</th><th>Latest report</th><th>Status</th></tr></thead><tbody>' + names.map(n => {
+    const d = lora.devs[n], age = Math.round((now - d.last) / 1000), mine = rs.filter(r => r.name === n), c = [];
+    mine.forEach(r => r.counts.forEach((v, k) => { if (k > 0 && v > 0) c[k] = (c[k] || 0) + v; }));
+    const chips = c.map((v, k) => v ? '<span class="chip hot">' + esc(loraCls(k)) + ' ' + v + '</span>' : '').join('') || (mine.length ? '<span class="note">quiet</span>' : '-');
+    const silent = age > 2.5 * d.period + 10;
+    return '<tr><td>' + esc(n) + '</td><td>' + (age < 120 ? age + ' s ago' : Math.round(age / 60) + ' min ago') + '</td><td>' + (d.self ? 'this device' : d.rssi + ' dBm, SNR ' + d.snr) + '</td><td>' + d.n + '</td><td>' + d.missed + (d.reboots ? ' (' + d.reboots + ' restarts)' : '') + '</td><td>' + chips + '</td><td class="note">' + (d.rep ? esc(loraSumText(d.rep.seq, d.rep.period, d.rep.frames, d.rep.counts)) : '-') + '</td><td class="' + (silent ? 'bad' : 'ok') + '">' + (silent ? 'silent' : 'live') + '</td></tr>';
+  }).join('') + '</tbody></table>' : '<p class="note">No devices heard yet.</p>';
+  if (lora.logDirty) {
+    lora.logDirty = false;
+    const sig = e => e.self ? '' : '  <span class="note">(' + e.rssi + ' dBm, SNR ' + e.snr + ')</span>';
+    $('loraLog').innerHTML = lora.log.length ? lora.log.slice(0, 200).map(e => e.kind === 'msg'
+      ? '<div class="msg">' + stamp(e.t) + '  ' + (e.self ? 'this device sent message' : 'heard message') + '  <span class="who">' + esc(e.text) + '</span>' + sig(e) + '</div>'
+      : '<div class="' + (e.hot ? 'hot' : '') + '">' + stamp(e.t) + '  ' + (e.self ? 'this device sent' : 'heard') + '  <span class="who">' + esc(e.name) + '</span>  ' + esc(loraSumText(e.seq, e.period, e.frames, e.counts)) + sig(e) + '</div>').join('') : '<span class="note">Nothing yet.</span>';
   }
 }
-
-
-// ██████████████████████████████████████████████████████████████████████████████
-// ██                                                                          ██
-// ██  PART 4: MENU SYSTEM FUNCTIONS                                           ██
-// ██                                                                          ██
-// ██  DEPENDENCIES (functions called from Part 0):                            ██
-// ██  - myActionCollect(int classIdx)          [Part 1]                       ██
-// ██  - myActionTrain()                        [Part 2]                       ██
-// ██  - myActionInfer()                        [Part 3]                       ██
-// ██                                                                          ██
-// ██  VARIABLES USED (defined in Part 0):                                     ██
-// ██  - myClassLabels[NUM_CLASSES]                                                      ██
-// ██  - myTotalItems, myThresholdPress, myThresholdRelease                    ██
-// ██  - myLastActivityTime, myLastTapTime, myTapCooldown                      ██
-// ██  - myIsTouching, myLongPressTriggered, myMenuIndex, myIsSelected         ██
-// ██  - u8g2 (OLED display object)                                            ██
-// ██                                                                          ██
-// ██  NOTE: This part is called from loop() in Part 0                         ██
-// ██                                                                          ██
-// ██████████████████████████████████████████████████████████████████████████████
-
-
-// v003: LoRa messages screen. Whatever is typed in the Serial Monitor (+ Enter) is sent over LoRa.
-void myLoraDrawChat() {
-  char b[20];
-  u8g2.firstPage();
-  do {
-    u8g2.setFont(u8g2_font_5x7_tf);
-    snprintf(b, sizeof(b), "LoRa ch%d T%lu R%lu", myLoraChannel, myLoraTxN, myLoraRxN);
-    u8g2.drawStr(0, 7, b);
-    for (int k = 0; k < 2; k++) {
-      const char* m = k == 0 ? myLoraLastTx : myLoraLastRx;
-      const char* tag = k == 0 ? "TX " : "RX ";
-      char l1[20] = "", l2[20] = "";
-      if (m[0]) {
-        const char* sp = strchr(m, ' ');
-        snprintf(l1, sizeof(l1), "%s%.*s", tag, sp ? (int)(sp - m) : 10, m);
-        if (sp) snprintf(l2, sizeof(l2), "%.14s", sp + 1);
-      } else snprintf(l1, sizeof(l1), "%s-", tag);
-      u8g2.drawStr(0, 15 + k * 16, l1);
-      u8g2.drawStr(0, 23 + k * 16, l2);
-    }
-  } while (u8g2.nextPage());
+function loraCsv() {
+  const K = Math.max(1, ...lora.reports.map(r => r.counts.length)), head = ['time', 'device', 'seq', 'period_s', 'frames'];
+  for (let k = 0; k < K; k++) head.push('"' + loraCls(k).replace(/"/g, '""') + '"');
+  const rows = [head.join(',')].concat(lora.reports.map(r => [stamp(r.t), r.name, r.seq, r.period, r.frames].concat(r.counts).join(',')));
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv' })); a.download = 'lora-' + stamp(Date.now()).replace(/[: ]/g, '-') + '.csv';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
+$('loraCsv').onclick = loraCsv;
+$('loraClear').onclick = () => { lora.reports = []; lora.devs = {}; lora.log = []; lora.logDirty = true; loraRender(); };
+$('loraWin').oninput = loraRender;
+$('lcNameB').onclick = () => { const v = $('lcName').value.trim(); if (/^[A-Za-z0-9_-]{1,19}$/.test(v)) loraCmd('@name ' + v); else alert('Name: 1 to 19 letters, digits, - or _'); };
+$('lcRepB').onclick = () => { const v = parseInt($('lcRep').value); if (v >= 5 && v <= 3600) loraCmd('@report ' + v); else alert('Report period 5 to 3600 seconds'); };
+$('lcConfB').onclick = () => { const v = parseInt($('lcConf').value); if (v >= 0 && v <= 100) loraCmd('@conf ' + v); else alert('Confidence 0 to 100'); };
+$('lcChB').onclick = () => { const v = parseInt($('lcCh').value); if (v >= 0 && v <= 120) loraCmd('@' + v); else alert('Channel 0 to 120'); };
+$('lcInfoB').onclick = () => loraCmd('@info');
+$('lcAutoB').onclick = () => loraCmd('@autostart ' + $('lcAuto').value);
+$('lcSetB').onclick = () => loraCmd('@settings');
+$('lcResetB').onclick = () => { if (confirm('Put name, report period, channel, confidence, encryption and power-up behaviour back to the firmware defaults?')) loraCmd('@reset'); };
+$('lcMsgB').onclick = () => {
+  const v = $('lcMsg').value.replace(/[\r\n]+/g, ' ').trim(); if (!v) return;
+  if (!ser.writer) { log('Connect the serial monitor first (section 8).'); return; }
+  ser.writer.write('>' + v + '\n').then(() => { serAppend('> ' + v + '\n'); $('lcMsg').value = ''; }).catch(e => log('Serial send failed: ' + e.message));
+};
+$('lcMsg').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('lcMsgB').click(); } };
+setInterval(loraRender, 1000); loraRender();
 
-void myActionLoraChat() {
-  Serial.println(F("\n=== LORA MESSAGES ==="));
-  Serial.printf("name %s, channel %d (%.1f MHz), radio %s\n", myLoraName, myLoraChannel, myLoraFreq(), myLoraOk ? "ok" : "OFF");
-  Serial.println(F("Type text + Enter to send it. /exit (or hold the touch pad) leaves. @help lists the other commands."));
-  myResetTouchState();
-  char line[MY_LORA_MAX + 1];
-  int n = 0;
-  myLoraDrawChat();
-  unsigned long lastDraw = millis();
-  while (true) {
-    myLoraService();
-    while (Serial.available()) {
-      char c = Serial.read();
-      if (c == '\r' || c == '\n') {
-        line[n] = 0; n = 0;
-        if (!line[0]) continue;
-        if (!strcasecmp(line, "/exit") || !strcasecmp(line, "/x")) { Serial.println(F("Leaving LoRa messages")); myResetMenuState(); return; }
-        if (line[0] == '@') myLoraCommand(line);
-        else if (line[0] == '/') Serial.println(F("[E] unknown /command. Only /exit exists; everything else you type is sent"));
-        else myLoraSendText(line);
-        myLoraDrawChat(); lastDraw = millis();
-      } else if (n < (int)sizeof(line) - 1) line[n++] = c;
-    }
-    if (myCheckTouchInput() == 2) { Serial.println(F("Leaving LoRa messages")); myResetMenuState(); return; }
-    if (millis() - lastDraw > 1000) { myLoraDrawChat(); lastDraw = millis(); }
-    delay(5);
-  }
-}
+// ---------- wiring ----------
+$('btnDir').onclick = pickDir;
+$('btnZip').onclick = () => $('zipFile').click();
+$('zipFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadZipFile(f); };
+$('btnAddClass').onclick = addClass;
+$('newClass').onkeydown = e => { if (e.key === 'Enter') addClass(); };
+$('btnCam').onclick = () => state.stream ? stopCam() : startCam();
+$('btnCapture').onclick = capture;
+$('btnTrain').onclick = onTrain;
+$('btnPause').onclick = () => { state.pause = !state.pause; setTrainButtons(); };
+$('btnStop').onclick = () => { state.stop = true; state.pause = false; };
+$('btnEval').onclick = runEval;
+$('btnParity').onclick = () => parity();
+$('btnLive').onclick = toggleLive;
+$('btnSaveW').onclick = saveWeights;
+$('btnSaveZip').onclick = saveZip;
+$('inspClose').onclick = () => $('insp').close();
+$('inspDelete').onclick = () => state.insp && deleteSample(state.insp);
+$('inspMoveBtn').onclick = () => state.insp && moveSample(state.insp, parseInt($('inspMove').value));
+$('inspParity').onclick = () => parity(state.insp);
+$('insp').addEventListener('close', () => { /* keep state.insp for the parity button */ });
+document.querySelectorAll('.heatAgg').forEach(e => e.onchange = () => { heat.agg = e.value; syncHeatControls(); drawInsp(); renderDev(); });
+document.querySelectorAll('.heatOverlay').forEach(e => e.onchange = () => { heat.overlay = e.checked; syncHeatControls(); drawInsp(); renderDev(); });
+$('valMode').onchange = () => {
+  const fw = $('valMode').value === 'fw';
+  $('valAmtLabel').textContent = fw ? 'Images per class held out' : '% of smallest class held out';
+  $('valAmt').value = fw ? 3 : 20; renderClasses(); updateSplitInfo();
+};
+$('valAmt').oninput = () => { renderClasses(); updateSplitInfo(); };
+$('epochs').oninput = () => { const v = parseInt($('epochs').value); if (v >= 1 && !state.training) { state.epochsPlanned = v; drawCharts(); } };
+document.addEventListener('keydown', e => {
+  if ((e.code !== 'Space' && e.code !== 'KeyB') || $('insp').open || $('rev').open || !state.stream) return;
+  if (/^(INPUT|SELECT|TEXTAREA|BUTTON|SUMMARY)$/.test(document.activeElement.tagName)) return;
+  e.preventDefault(); if (e.code === 'KeyB') burst(); else capture();
+});
+$('btnBurst').onclick = burst;
+$('btnReview').onclick = openReview;
+$('inSize').onchange = onLayoutChange; $('c1f').onchange = onLayoutChange; $('c2f').onchange = onLayoutChange;
+$('revClose').onclick = () => $('rev').close();
+$('revClass').onchange = () => buildRev(0);
+$('revSusp').onchange = () => buildRev(0);
+$('revPrev').onclick = () => revMove(-1);
+$('revNext').onclick = () => revMove(1);
+$('revMark').onclick = revToggle;
+$('revNextClass').onclick = revNextClass;
+$('revDelete').onclick = deleteMarked;
+$('revClear').onclick = () => { state.marks.clear(); showRev(); };
+$('rev').addEventListener('keydown', e => {
+  if (/^(SELECT|INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); revMove(-1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); revMove(1); }
+  else if (e.key === 'x' || e.key === 'X' || e.key === 'Delete') { e.preventDefault(); revToggle(); }
+});
+$('btnSaveCfg').onclick = saveConfig;
+$('btnSerial').onclick = serConnect;
+$('serDebug').onchange = serDebugSync;
+$('serSend').onclick = serSend;
+$('serIn').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); serSend(); } };
+if ('serial' in navigator) navigator.serial.addEventListener('disconnect', e => { if (e.target === ser.port) serDisconnect(); });
+else { $('btnSerial').disabled = true; $('btnSerial').classList.remove('primary'); $('serStatus').textContent = 'Web Serial is not available in this browser. Use desktop Chrome or Edge.'; }
+window.addEventListener('beforeunload', e => { if (state.dirty) { e.preventDefault(); e.returnValue = ''; } });
 
-String myMenuLabel(int i) {
-  if (i <= NUM_CLASSES)     return myClassLabels[i - 1];
-  if (i == NUM_CLASSES + 1) return "Train";
-  if (i == NUM_CLASSES + 2) return "Infer";
-  return "LoRa msg";
-}
+if (!window.showDirectoryPicker) {
+  $('btnDir').disabled = true; $('btnDir').classList.remove('primary'); $('btnZip').classList.add('primary');
+  $('dirNote').textContent = 'This browser has no folder picker (phones, Safari, Firefox). Use Load .zip, then Save .zip. Desktop Chrome or Edge can work directly on the SD card.';
+} else $('dirNote').textContent = 'Desktop Chrome or Edge: pick the SD card root and changes are written straight to the card. Other browsers: use .zip.';
 
-void myResetMenuState() {
-  myIsSelected = false;
-  myResetTouchState();  // Use unified touch reset
-  myLastActivityTime = millis();
-  myDrawMenu();
-}
-
-void myDrawMenu() {
-  // ===== SERIAL MENU =====
-  Serial.println("\n=== MENU ===");
-  for (int i = 1; i <= myTotalItems; i++) {
-    String label = myMenuLabel(i);
-
-    if (i == myMenuIndex) Serial.print(" > ");
-    else                 Serial.print("   ");
-
-    Serial.printf("%d. %s\n", i, label.c_str());
-  }
-  Serial.println("Commands: t=next (tap)  l=select (longpress)   >text = send a LoRa message");
-
-  // ===== OLED MENU =====
-  u8g2.firstPage();
-  do {
-    u8g2.setFont(u8g2_font_6x10_tf);
-    u8g2.drawStr(0, 8, "TAP:Next HOLD:Ok");
-
-    int myStartItem = (myMenuIndex <= NUM_CLASSES) ? 1 : myMenuIndex - 2;
-
-    for (int i = 0; i < 3; i++) {
-      int cur = myStartItem + i;
-      if (cur > myTotalItems) break;
-
-      String label = myMenuLabel(cur);
-
-      int y = 18 + i * 9;
-      if (cur == myMenuIndex)
-        u8g2.drawStr(0, y, ("> " + label).c_str());
-      else
-        u8g2.drawStr(0, y, ("  " + label).c_str());
-    }
-  } while (u8g2.nextPage());
-}
-
-// Helper: execute the currently selected menu item
-void myExecuteMenuItem(int idx) {
-  if (idx <= NUM_CLASSES)        myActionCollect(idx - 1);
-  else if (idx == NUM_CLASSES+1) myActionTrain();
-  else if (idx == NUM_CLASSES+2) myActionInfer();
-  else                           myActionLoraChat();
-}
-
-void myHandleMenuNavigation() {
-  unsigned long myCurrentMillis = millis();
-
-  // --------------------------------------------------------------------------
-  // SERIAL INPUT
-  // --------------------------------------------------------------------------
-  if (!myIsSelected && Serial.available()) {
-    char c = Serial.read();
-
-    // Single-digit direct selection (works for NUM_CLASSES up to 9+2=11 items via digit keys)
-    if (myHandleDebugChar(c)) {
-      // handled: web page debug heartbeat
-    }
-    else if (c >= '1' && c <= '9') {
-      int newIndex = c - '0';
-      if (newIndex <= myTotalItems) {
-        myMenuIndex = newIndex;
-        myIsSelected = true;
-        myLastActivityTime = myCurrentMillis;
-        myExecuteMenuItem(myMenuIndex);
-      }
-    }
-    else if (c == 't' || c == 'T') {
-      if (myCurrentMillis - myLastTapTime > myTapCooldown) {
-        myMenuIndex++;
-        if (myMenuIndex > myTotalItems) myMenuIndex = 1;
-        myDrawMenu();
-        myLastTapTime = myCurrentMillis;
-        myLastActivityTime = myCurrentMillis;
-      }
-    }
-    else if (c == 'l' || c == 'L') {
-      myIsSelected = true;
-      myLastActivityTime = myCurrentMillis;
-      myExecuteMenuItem(myMenuIndex);
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // TOUCH INPUT - NOW USING UNIFIED SYSTEM
-  // --------------------------------------------------------------------------
-  if (!myIsSelected) {
-    int touchAction = myCheckTouchInput();
-    
-    if (touchAction == 1) {
-      // Tap detected - advance menu
-      if (myCurrentMillis - myLastTapTime > myTapCooldown) {
-        myMenuIndex++;
-        if (myMenuIndex > myTotalItems) myMenuIndex = 1;
-        myDrawMenu();
-        myLastTapTime = myCurrentMillis;
-        myLastActivityTime = myCurrentMillis;
-      }
-    }
-    else if (touchAction == 2) {
-      // Long press detected - select menu item
-      myIsSelected = true;
-      myLastActivityTime = myCurrentMillis;
-      myExecuteMenuItem(myMenuIndex);
-    }
-  }
-}
+syncHeatControls(); syncLayoutControls(); renderAll();
+log('Vision CNN SD trainer ' + VERSION + ' ready. Layout ' + IN + 'x' + IN + 'x3, conv filters ' + C1F + '/' + C2F + ', ' + FLAT + ' flattened.');
+</script>
+</body>
+</html>
