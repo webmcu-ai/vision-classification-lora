@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  webMCU-AI  |  Vision CNN SD trainer + LoRa network  |  v001
+  webMCU-AI  |  Vision CNN SD trainer + LoRa network  |  v006
   Companion page for the XIAO ESP32-S3 "FULL VISION ML v44" firmware.
   Reads images/<class>/*.jpg from the SD card, trains the same CNN (input size and filters selectable) in plain JS,
   analyzes the dataset, and writes header/myWeights.bin back for the device to load.
@@ -10,7 +10,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vision CNN + LoRa network v001</title>
+<title>Vision CNN + LoRa network v006</title>
 <style>
 :root{--bg:#11151b;--panel:#182029;--panel2:#1f2a36;--line:#2c3947;--text:#dde5ee;--mut:#8b9aac;--acc:#66d1bd;--acc-ink:#062a24;--bad:#ef6b73;--warn:#e9b44c;--ok:#7bd88f;--r:8px}
 *{box-sizing:border-box}
@@ -95,13 +95,15 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
 .chip.hot{border-color:var(--bad);color:#ffb3b8}
 #loraLog{max-height:260px;overflow:auto;font:13px/1.55 ui-monospace,Consolas,monospace;background:#0f1319;border:1px solid var(--line);border-radius:6px;padding:8px 12px}
 #loraLog .hot{color:#ffb3b8}
+#loraLog .msg{color:var(--acc)}
+#loraLog .who{font-weight:650}
 .row.cmd input{width:150px;min-width:0}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
 <body>
 <header>
-  <h1>Vision CNN SD trainer<span class="ver">LoRa v001</span></h1>
+  <h1>Vision CNN SD trainer<span class="ver">LoRa v006</span></h1>
   <p>Browser companion for the XIAO ESP32-S3 FULL VISION ML firmware (v44, or firmware-v005 for config.json class names and debug frames): load the SD card, add images, review and clean them, train the same CNN, then write myWeights.bin back to the card.</p>
   <p>Everything runs in this page. Images and weights never leave your computer.</p>
   <p><b>LoRa network:</b> connect one device in section 8 and section 9 sums what every nearby LoRa device has seen. <a href="#s-lora" style="color:var(--acc)">Jump to LoRa network</a></p>
@@ -302,6 +304,11 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
   <div class="tblwrap" id="loraDevs"></div>
   <h3>Event log</h3>
   <div id="loraLog"></div>
+  <h3>Send a message</h3>
+  <div class="row cmd">
+    <input type="text" id="lcMsg" maxlength="80" placeholder="Message for every LoRa device that is listening" aria-label="LoRa message" style="flex:1;min-width:220px"><button id="lcMsgB">Send message</button>
+  </div>
+  <p class="note">Sent through the connected device (section 8). Its own line and every reply from other devices appear in the event log above, with the time, the device and the signal strength.</p>
   <h3>Settings of the connected device</h3>
   <div class="row cmd">
     <input type="text" id="lcName" placeholder="device-a02" aria-label="Device name"><button id="lcNameB">Set name</button>
@@ -310,6 +317,11 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
     <input type="number" id="lcCh" placeholder="0" min="0" max="120" aria-label="Channel"><button id="lcChB">Set channel</button>
     <button id="lcInfoB">Refresh info</button>
   </div>
+  <div class="row cmd">
+    <select id="lcAuto" aria-label="Start inference by itself after a power cycle"><option value="on">Inference starts by itself after power-up</option><option value="off">Stay in the menu after power-up</option></select><button id="lcAutoB">Set power-up behaviour</button>
+    <button id="lcSetB">Show commands and settings</button><button id="lcResetB" class="danger">Reset to defaults</button>
+  </div>
+  <p class="note">"Show commands and settings" prints the command list in the serial monitor (section 8) with the current value of every setting and whether it is the default or saved in the device. The defaults themselves are in the USER SETTINGS block at the top of the firmware.</p>
   <p class="note" id="loraInfo">No device info yet. All devices must use the same channel. Name, report period, confidence and channel are saved in the device.</p>
 </section>
 
@@ -363,7 +375,7 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
 
 <script>
 'use strict';
-const VERSION = 'lora-v001';
+const VERSION = 'lora-v006';
 
 /* ==CORE START== (no DOM use below this line until CORE END) */
 
@@ -1429,7 +1441,7 @@ async function serConnect() {
   const dec = new TextDecoderStream(); ser.readDone = port.readable.pipeTo(dec.writable).catch(() => {}); ser.reader = dec.readable.getReader();
   const enc = new TextEncoderStream(); ser.writeDone = enc.readable.pipeTo(port.writable).catch(() => {}); ser.writer = enc.writable.getWriter();
   serUi(true); log('Serial connected.');
-  serDebugSync(); serBeat = setInterval(serDebugSync, 5000); setTimeout(() => ser.writer && ser.writer.write('@info\n').catch(() => {}), 2500);
+  serDebugSync(); serBeat = setInterval(serDebugSync, 5000); setTimeout(() => ser.writer && ser.writer.write('@pageinfo\n').catch(() => {}), 2500);
   const rd = ser.reader;
   (async () => { try { for (;;) { const { value, done } = await rd.read(); if (done) break; if (value) serFeed(value); } } catch (e) { /* closed */ } if (ser.port === port) serDisconnect(); })();
 }
@@ -1451,9 +1463,9 @@ function serFeed(chunk) {
   let i;
   while ((i = serPend.indexOf('\n')) >= 0) {
     const line = serPend.slice(0, i); serPend = serPend.slice(i + 1);
-    if (line.startsWith('@LORA')) loraLine(line.trim()); else if (line.charCodeAt(0) === 64) serFrame(line.trim()); else serAppend(line.replace(/\r$/, '') + '\n');
+    if (line.startsWith('@LORA')) loraLine(line.trim()); else if (line.startsWith('@F ')) serFrame(line.trim()); else serAppend(line.replace(/\r$/, '') + '\n');
   }
-  if (serPend && serPend.charCodeAt(0) !== 64) { serAppend(serPend); serPend = ''; }
+  if (serPend && !(serPend.startsWith('@F ') || serPend.startsWith('@LORA') || '@F '.startsWith(serPend) || '@LORA'.startsWith(serPend))) { serAppend(serPend); serPend = ''; }
 }
 function serFrame(line) {
   const f = line.split(' ');
@@ -1497,7 +1509,7 @@ async function renderDev() {
 }
 
 
-// ---------- LoRa network (v001) ----------
+// ---------- LoRa network: event log, messages, settings buttons ----------
 const lora = { reports: [], devs: {}, classes: null, log: [], logDirty: true, beepAt: 0 };
 const loraWinMs = () => Math.min(60, Math.max(1, parseFloat($('loraWin').value) || 3)) * 60000;
 const loraCls = i => (lora.classes && lora.classes[i]) || state.classes[i] || ('class ' + i);
@@ -1505,17 +1517,28 @@ const p2 = n => String(n).padStart(2, '0');
 const stamp = t => { const d = new Date(t); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()); };
 function loraCmd(t) {
   if (!ser.writer) { log('Connect the serial monitor first (section 8).'); return; }
-  ser.writer.write(t + '\n').then(() => { serAppend('> ' + t + '\n'); setTimeout(() => ser.writer && ser.writer.write('@info\n').catch(() => {}), 500); }).catch(e => log('Serial send failed: ' + e.message));
+  ser.writer.write(t + '\n').then(() => { serAppend('> ' + t + '\n'); setTimeout(() => ser.writer && ser.writer.write('@pageinfo\n').catch(() => {}), 500); }).catch(e => log('Serial send failed: ' + e.message));
 }
 function loraBeep() {
   if (!$('loraBeep').checked || Date.now() - lora.beepAt < 5000) return; lora.beepAt = Date.now();
   try { const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator(), g = a.createGain(); o.frequency.value = 880; g.gain.value = 0.15; o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + 0.18); } catch (e) { /* no audio */ }
 }
+function loraSumText(seq, period, frames, counts) {
+  const unsure = frames - counts.reduce((a, b) => a + b, 0);
+  return 'summary #' + seq + ', ' + period + ' s window, ' + frames + ' frames: ' + counts.map((v, k) => loraCls(k) + ' ' + v).join(', ') + (unsure > 0 ? ', unsure ' + unsure + ' (below the confidence limit)' : '');
+}
 function loraLine(line) {
+  if (line.startsWith('@LORA-MSG')) {
+    const m = /^@LORA-MSG (\S+) (\S+) (.*)$/.exec(line); if (!m) return;
+    const self = m[1] === 'self';
+    lora.log.unshift({ t: Date.now(), kind: 'msg', self, rssi: self ? null : +m[1], snr: self ? null : +m[2], text: m[3] });
+    if (lora.log.length > 300) lora.log.length = 300;
+    lora.logDirty = true; loraRender(); return;
+  }
   if (line.startsWith('@LORA-INFO')) {
     const m = /classes=(.*)$/.exec(line); if (m && m[1]) lora.classes = m[1].split(',');
     const kv = {}; line.replace(/(\w+)=([^\s]+)/g, (a, k, v) => kv[k] = v);
-    $('loraInfo').textContent = 'Connected device: ' + kv.name + ', channel ' + kv.ch + ' (' + (915 + kv.ch * 0.1).toFixed(1) + ' MHz), report every ' + kv.report + ' s, min confidence ' + kv.conf + '%, radio ' + kv.radio + '. Classes: ' + (lora.classes || []).join(', ');
+    $('loraInfo').textContent = 'Connected device: ' + kv.name + ', channel ' + kv.ch + ' (' + (915 + kv.ch * 0.1).toFixed(1) + ' MHz), report every ' + kv.report + ' s, min confidence ' + kv.conf + '%, radio ' + kv.radio + ', inference after power-up: ' + (kv.auto === '1' ? 'starts by itself' : kv.auto === '0' ? 'waits in the menu' : 'unknown (older firmware)') + '. Classes: ' + (lora.classes || []).join(', ');
     loraRender(); return;
   }
   const f = line.split(' '); if (f[0] !== '@LORA' || f.length < 4) return;
@@ -1525,12 +1548,12 @@ function loraLine(line) {
   const now = Date.now(), self = f[1] === 'self';
   const d = lora.devs[name] || (lora.devs[name] = { name, last: 0, seq: -1, missed: 0, reboots: 0, n: 0, rssi: null, snr: null, period, self });
   if (d.seq >= 0) { if (seq > d.seq + 1) d.missed += seq - d.seq - 1; else if (seq <= d.seq) d.reboots++; }
-  Object.assign(d, { seq, last: now, period, self }); d.n++;
+  Object.assign(d, { seq, last: now, period, self, rep: { seq, period, frames, counts } }); d.n++;
   if (!self) { d.rssi = +f[1]; d.snr = +f[2]; }
   lora.reports.push({ t: now, name, seq, period, frames, counts });
   lora.reports = lora.reports.filter(r => now - r.t <= 3600000);
   const hot = counts.slice(1).map((v, i) => v > 0 ? loraCls(i + 1) + ' \u00d7' + v : '').filter(Boolean);
-  lora.log.unshift({ t: now, name, hot: hot.length > 0, text: hot.join(', ') }); if (lora.log.length > 300) lora.log.length = 300;
+  lora.log.unshift({ t: now, kind: 'sum', name, self, rssi: self ? null : +f[1], snr: self ? null : +f[2], hot: hot.length > 0, counts, seq, period, frames }); if (lora.log.length > 300) lora.log.length = 300;
   lora.logDirty = true; if (hot.length) loraBeep();
   loraRender();
 }
@@ -1550,16 +1573,19 @@ function loraRender() {
     act.map(k => '<tr><td><b>' + esc(loraCls(k)) + '</b></td><td>' + tot[k] + '</td><td>' + Object.entries(who[k]).map(([n, v]) => '<span class="chip hot">' + esc(n) + ' ' + v + '</span>').join('') + '</td></tr>').join('') + '</tbody></table>'
     : '<p class="note">' + (rs.length ? 'Only class 0 in the last ' + mins + ' minutes.' : 'No reports in the last ' + mins + ' minutes.') + '</p>';
   const names = Object.keys(lora.devs).sort();
-  $('loraDevs').innerHTML = names.length ? '<table><thead><tr><th>Device</th><th>Heard</th><th>Signal</th><th>Reports</th><th>Missed</th><th>Last ' + mins + ' min</th><th>Status</th></tr></thead><tbody>' + names.map(n => {
+  $('loraDevs').innerHTML = names.length ? '<table><thead><tr><th>Device</th><th>Heard</th><th>Signal</th><th>Reports</th><th>Missed</th><th>Last ' + mins + ' min</th><th>Latest report</th><th>Status</th></tr></thead><tbody>' + names.map(n => {
     const d = lora.devs[n], age = Math.round((now - d.last) / 1000), mine = rs.filter(r => r.name === n), c = [];
     mine.forEach(r => r.counts.forEach((v, k) => { if (k > 0 && v > 0) c[k] = (c[k] || 0) + v; }));
     const chips = c.map((v, k) => v ? '<span class="chip hot">' + esc(loraCls(k)) + ' ' + v + '</span>' : '').join('') || (mine.length ? '<span class="note">quiet</span>' : '-');
     const silent = age > 2.5 * d.period + 10;
-    return '<tr><td>' + esc(n) + '</td><td>' + (age < 120 ? age + ' s ago' : Math.round(age / 60) + ' min ago') + '</td><td>' + (d.self ? 'this device' : d.rssi + ' dBm, SNR ' + d.snr) + '</td><td>' + d.n + '</td><td>' + d.missed + (d.reboots ? ' (' + d.reboots + ' restarts)' : '') + '</td><td>' + chips + '</td><td class="' + (silent ? 'bad' : 'ok') + '">' + (silent ? 'silent' : 'live') + '</td></tr>';
+    return '<tr><td>' + esc(n) + '</td><td>' + (age < 120 ? age + ' s ago' : Math.round(age / 60) + ' min ago') + '</td><td>' + (d.self ? 'this device' : d.rssi + ' dBm, SNR ' + d.snr) + '</td><td>' + d.n + '</td><td>' + d.missed + (d.reboots ? ' (' + d.reboots + ' restarts)' : '') + '</td><td>' + chips + '</td><td class="note">' + (d.rep ? esc(loraSumText(d.rep.seq, d.rep.period, d.rep.frames, d.rep.counts)) : '-') + '</td><td class="' + (silent ? 'bad' : 'ok') + '">' + (silent ? 'silent' : 'live') + '</td></tr>';
   }).join('') + '</tbody></table>' : '<p class="note">No devices heard yet.</p>';
   if (lora.logDirty) {
     lora.logDirty = false;
-    $('loraLog').innerHTML = lora.log.length ? lora.log.slice(0, 200).map(e => '<div class="' + (e.hot ? 'hot' : '') + '" title="' + esc(e.name) + '">' + stamp(e.t) + (e.hot ? '  ' + esc(e.name) + '  ' + esc(e.text) : '') + '</div>').join('') : '<span class="note">Nothing yet.</span>';
+    const sig = e => e.self ? '' : '  <span class="note">(' + e.rssi + ' dBm, SNR ' + e.snr + ')</span>';
+    $('loraLog').innerHTML = lora.log.length ? lora.log.slice(0, 200).map(e => e.kind === 'msg'
+      ? '<div class="msg">' + stamp(e.t) + '  ' + (e.self ? 'this device sent message' : 'heard message') + '  <span class="who">' + esc(e.text) + '</span>' + sig(e) + '</div>'
+      : '<div class="' + (e.hot ? 'hot' : '') + '">' + stamp(e.t) + '  ' + (e.self ? 'this device sent' : 'heard') + '  <span class="who">' + esc(e.name) + '</span>  ' + esc(loraSumText(e.seq, e.period, e.frames, e.counts)) + sig(e) + '</div>').join('') : '<span class="note">Nothing yet.</span>';
   }
 }
 function loraCsv() {
@@ -1576,7 +1602,16 @@ $('lcNameB').onclick = () => { const v = $('lcName').value.trim(); if (/^[A-Za-z
 $('lcRepB').onclick = () => { const v = parseInt($('lcRep').value); if (v >= 5 && v <= 3600) loraCmd('@report ' + v); else alert('Report period 5 to 3600 seconds'); };
 $('lcConfB').onclick = () => { const v = parseInt($('lcConf').value); if (v >= 0 && v <= 100) loraCmd('@conf ' + v); else alert('Confidence 0 to 100'); };
 $('lcChB').onclick = () => { const v = parseInt($('lcCh').value); if (v >= 0 && v <= 120) loraCmd('@' + v); else alert('Channel 0 to 120'); };
-$('lcInfoB').onclick = () => loraCmd('@info');
+$('lcInfoB').onclick = () => loraCmd('@pageinfo');
+$('lcAutoB').onclick = () => loraCmd('@autostart ' + $('lcAuto').value);
+$('lcSetB').onclick = () => loraCmd('@help');
+$('lcResetB').onclick = () => { if (confirm('Put name, report period, channel, confidence, encryption and power-up behaviour back to the firmware defaults?')) loraCmd('@reset'); };
+$('lcMsgB').onclick = () => {
+  const v = $('lcMsg').value.replace(/[\r\n]+/g, ' ').trim(); if (!v) return;
+  if (!ser.writer) { log('Connect the serial monitor first (section 8).'); return; }
+  ser.writer.write('>' + v + '\n').then(() => { serAppend('> ' + v + '\n'); $('lcMsg').value = ''; }).catch(e => log('Serial send failed: ' + e.message));
+};
+$('lcMsg').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('lcMsgB').click(); } };
 setInterval(loraRender, 1000); loraRender();
 
 // ---------- wiring ----------
