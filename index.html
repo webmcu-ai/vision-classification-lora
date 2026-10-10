@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  webMCU-AI  |  Vision CNN SD trainer + LoRa network  |  v006
+  webMCU-AI  |  Vision CNN SD trainer + LoRa network  |  v010
   Companion page for the XIAO ESP32-S3 "FULL VISION ML v44" firmware.
   Reads images/<class>/*.jpg from the SD card, trains the same CNN (input size and filters selectable) in plain JS,
   analyzes the dataset, and writes header/myWeights.bin back for the device to load.
@@ -10,7 +10,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vision CNN + LoRa network v006</title>
+<title>Vision CNN + LoRa network v010</title>
 <style>
 :root{--bg:#11151b;--panel:#182029;--panel2:#1f2a36;--line:#2c3947;--text:#dde5ee;--mut:#8b9aac;--acc:#66d1bd;--acc-ink:#062a24;--bad:#ef6b73;--warn:#e9b44c;--ok:#7bd88f;--r:8px}
 *{box-sizing:border-box}
@@ -97,13 +97,24 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
 #loraLog .hot{color:#ffb3b8}
 #loraLog .msg{color:var(--acc)}
 #loraLog .who{font-weight:650}
+tr.tot td{font-weight:600;background:var(--panel2)}
+.lhleg{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}
+.lhleg button{min-height:34px;padding:4px 12px;display:flex;gap:7px;align-items:center}
+.lhleg button.off{opacity:.45;text-decoration:line-through}
+.lhleg i{display:inline-block;width:11px;height:11px;border-radius:50%}
+.lhnote{margin:6px 0;padding:6px 10px;border-radius:6px;background:var(--panel2);font-size:.92em}
+.lhnote:empty{display:none}
+.lhpick{margin:6px 0;padding:8px 10px;background:var(--panel2);border-radius:6px;white-space:pre-wrap;font:inherit;font-size:.92em;min-height:3.4em}
+#lhChart circle.hit{cursor:pointer}
+.lhchart{background:#0f1319;border:1px solid var(--line);border-radius:6px;padding:6px}
+.lhchart svg{width:100%;height:auto;display:block}
 .row.cmd input{width:150px;min-width:0}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
 <body>
 <header>
-  <h1>Vision CNN SD trainer<span class="ver">LoRa v006</span></h1>
+  <h1>Vision CNN SD trainer<span class="ver">LoRa v010</span></h1>
   <p>Browser companion for the XIAO ESP32-S3 FULL VISION ML firmware (v44, or firmware-v005 for config.json class names and debug frames): load the SD card, add images, review and clean them, train the same CNN, then write myWeights.bin back to the card.</p>
   <p>Everything runs in this page. Images and weights never leave your computer.</p>
   <p><b>LoRa network:</b> connect one device in section 8 and section 9 sums what every nearby LoRa device has seen. <a href="#s-lora" style="color:var(--acc)">Jump to LoRa network</a></p>
@@ -295,7 +306,7 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
   <div class="row">
     <label class="chk">Window <input type="number" id="loraWin" value="3" min="1" max="60" style="width:72px" aria-label="Window in minutes"> minutes</label>
     <label class="chk"><input type="checkbox" id="loraBeep"> Beep when class 1 or higher is seen</label>
-    <button id="loraCsv">Export CSV</button><button id="loraClear" class="danger">Clear</button>
+    <button id="loraCsv" title="Only the last hour of reports. Section 10 keeps everything since connecting.">Export last-hour CSV</button><button id="loraClear" class="danger">Clear</button>
   </div>
   <div id="loraBanner" class="lorabanner wait"><div class="big">Waiting for LoRa reports</div><div class="note">Connect a device in section 8 and wait one report period.</div></div>
   <h3>Summed result</h3>
@@ -323,6 +334,34 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
   </div>
   <p class="note">"Show commands and settings" prints the command list in the serial monitor (section 8) with the current value of every setting and whether it is the default or saved in the device. The defaults themselves are in the USER SETTINGS block at the top of the firmware.</p>
   <p class="note" id="loraInfo">No device info yet. All devices must use the same channel. Name, report period, confidence and channel are saved in the device.</p>
+</section>
+
+<section id="s-lorahist">
+  <h2>10 LoRa history since connected</h2>
+  <p class="note">Everything this page has heard since the serial monitor was first connected: totals per device, a graph with one line per class, and CSV export. Import a saved CSV file to look at it (view only, your live data keeps collecting), or use Import CSV and continue to load it into the history so new reports are added after it. A messages CSV can be imported too, and you can pick several files at once. Section 9 only shows the last few minutes. The devices send counts per report period, so these totals are the sum of every report heard while this page was connected, not the device's own count since it booted.</p>
+  <div id="lhStatus" class="note" role="status"></div>
+  <div class="row cmd">
+    <button id="lhCsv" class="primary">Download CSV</button><button id="lhMsgCsv">Download messages CSV (0)</button><button id="lhSvg">Download graph (SVG)</button>
+  </div>
+  <div class="row cmd">
+    <button id="lhImport">Import CSV to view</button><button id="lhContinue">Import CSV and continue</button><input type="file" id="lhFile" accept=".csv,text/csv" multiple hidden>
+    <button id="lhLive" hidden>Back to live data</button><button id="lhClear" class="danger">Clear history</button>
+  </div>
+  <div id="lhNote" class="lhnote" role="status"></div>
+  <h3>Totals</h3>
+  <div class="tblwrap" id="lhStats"></div>
+  <h3>Graph</h3>
+  <div class="row cmd">
+    <label>Device <select id="lhDev" aria-label="Device for the graph"><option value="">All devices</option></select></label>
+    <label>Show <select id="lhMode" aria-label="What the graph shows"><option value="win">Frames per step</option><option value="cum">Running total</option><option value="pct">Share of classified frames</option></select></label>
+    <label>Step <select id="lhBucket" aria-label="Time step"><option value="0">Automatic</option><option value="60">1 minute</option><option value="300">5 minutes</option><option value="900">15 minutes</option><option value="3600">1 hour</option></select></label>
+  </div>
+  <div id="lhLegend" class="lhleg"></div>
+  <div id="lhChart" class="lhchart"></div>
+  <pre id="lhPick" class="lhpick" aria-live="polite">Hover over or tap a point on the graph to see which devices it came from.</pre>
+  <p class="note">Click a class name to hide or show its line. A step adds up every report heard in that time (all devices, or the one selected).</p>
+  <h3>Messages</h3>
+  <div class="tblwrap" id="lhMsgs"></div>
 </section>
 
 </main>
@@ -375,7 +414,7 @@ button.burst.recording{background:var(--bad);color:#fff;border-color:var(--bad);
 
 <script>
 'use strict';
-const VERSION = 'lora-v006';
+const VERSION = 'lora-v010';
 
 /* ==CORE START== (no DOM use below this line until CORE END) */
 
@@ -1438,6 +1477,8 @@ async function serConnect() {
   try { port = await navigator.serial.requestPort(); await port.open({ baudRate: 115200 }); }
   catch (e) { if (e.name !== 'NotFoundError') log('Serial: ' + e.message); return; }
   ser.port = port;
+  if (!lora.t0) lora.t0 = Date.now();
+  lhDirty = true;
   const dec = new TextDecoderStream(); ser.readDone = port.readable.pipeTo(dec.writable).catch(() => {}); ser.reader = dec.readable.getReader();
   const enc = new TextEncoderStream(); ser.writeDone = enc.readable.pipeTo(port.writable).catch(() => {}); ser.writer = enc.writable.getWriter();
   serUi(true); log('Serial connected.');
@@ -1510,7 +1551,7 @@ async function renderDev() {
 
 
 // ---------- LoRa network: event log, messages, settings buttons ----------
-const lora = { reports: [], devs: {}, classes: null, log: [], logDirty: true, beepAt: 0 };
+const lora = { reports: [], devs: {}, classes: null, log: [], logDirty: true, beepAt: 0, hist: [], hmsgs: [], t0: 0, view: null, loaded: 0, histClasses: null };
 const loraWinMs = () => Math.min(60, Math.max(1, parseFloat($('loraWin').value) || 3)) * 60000;
 const loraCls = i => (lora.classes && lora.classes[i]) || state.classes[i] || ('class ' + i);
 const p2 = n => String(n).padStart(2, '0');
@@ -1533,6 +1574,7 @@ function loraLine(line) {
     const self = m[1] === 'self';
     lora.log.unshift({ t: Date.now(), kind: 'msg', self, rssi: self ? null : +m[1], snr: self ? null : +m[2], text: m[3] });
     if (lora.log.length > 300) lora.log.length = 300;
+    lora.hmsgs.push({ t: Date.now(), self, rssi: self ? null : +m[1], snr: self ? null : +m[2], text: m[3] });
     lora.logDirty = true; loraRender(); return;
   }
   if (line.startsWith('@LORA-INFO')) {
@@ -1552,6 +1594,7 @@ function loraLine(line) {
   if (!self) { d.rssi = +f[1]; d.snr = +f[2]; }
   lora.reports.push({ t: now, name, seq, period, frames, counts });
   lora.reports = lora.reports.filter(r => now - r.t <= 3600000);
+  lora.hist.push({ t: now, name, self, seq, period, frames, counts, rssi: self ? null : +f[1], snr: self ? null : +f[2] }); lhDirty = true;
   const hot = counts.slice(1).map((v, i) => v > 0 ? loraCls(i + 1) + ' \u00d7' + v : '').filter(Boolean);
   lora.log.unshift({ t: now, kind: 'sum', name, self, rssi: self ? null : +f[1], snr: self ? null : +f[2], hot: hot.length > 0, counts, seq, period, frames }); if (lora.log.length > 300) lora.log.length = 300;
   lora.logDirty = true; if (hot.length) loraBeep();
@@ -1613,6 +1656,264 @@ $('lcMsgB').onclick = () => {
 };
 $('lcMsg').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('lcMsgB').click(); } };
 setInterval(loraRender, 1000); loraRender();
+
+// ---------- LoRa history since connected: statistics, graph, CSV export and import ----------
+let lhDirty = true;
+const lhHidden = new Set();
+const lhPalette = ['#8b9aac', '#66d1bd', '#e9b44c', '#ef6b73', '#7aa7ff', '#c792ea', '#7bd88f', '#ffa657', '#f78fb3', '#4dd0e1'];
+const lhColor = k => lhPalette[k % lhPalette.length];
+const lhClock = t => { const d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()); };
+const lhDur = ms => { const s = Math.max(0, Math.round(ms / 1000)); return Math.floor(s / 3600) + ':' + p2(Math.floor(s / 60) % 60) + ':' + p2(s % 60); };
+const csvq = v => { v = String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+function lhSave(name, text, type) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+const lhFileStamp = () => stamp(Date.now()).replace(/[: ]/g, '-');
+
+// what the section shows: the live history, or an imported CSV file
+function lhData() {
+  if (lora.view) return lora.view;
+  let K = Math.max(lora.classes ? lora.classes.length : 1, lora.histClasses ? lora.histClasses.length : 1);
+  lora.hist.forEach(r => { if (r.counts.length > K) K = r.counts.length; });
+  const classes = []; for (let k = 0; k < K; k++) classes.push((lora.classes && lora.classes[k]) || (lora.histClasses && lora.histClasses[k]) || loraCls(k));
+  return { live: true, name: '', rows: lora.hist, classes, t0: lora.t0 || (lora.hist.length ? lora.hist[0].t : Date.now()) };
+}
+
+// per-device and overall totals
+function lhStats(rows, K) {
+  const per = {};
+  const tot = { name: 'All devices', self: false, n: 0, frames: 0, cls: new Array(K).fill(0), missed: 0, reboots: 0, first: 0, last: 0, rssiSum: 0, rssiN: 0 };
+  rows.forEach(r => {
+    const d = per[r.name] || (per[r.name] = { name: r.name, self: false, n: 0, frames: 0, cls: new Array(K).fill(0), seq: -1, missed: 0, reboots: 0, first: r.t, last: r.t, rssiSum: 0, rssiN: 0 });
+    if (d.seq >= 0) { if (r.seq > d.seq + 1) d.missed += r.seq - d.seq - 1; else if (r.seq <= d.seq) d.reboots++; }
+    d.seq = r.seq; d.n++; d.frames += r.frames; d.first = Math.min(d.first, r.t); d.last = Math.max(d.last, r.t);
+    if (r.self) d.self = true;
+    r.counts.forEach((v, k) => { if (k < K) d.cls[k] += v; });
+    if (!r.self && r.rssi != null && Number.isFinite(r.rssi)) { d.rssiSum += r.rssi; d.rssiN++; }
+  });
+  const list = Object.values(per).sort((a, b) => a.name.localeCompare(b.name));
+  list.forEach(d => {
+    tot.n += d.n; tot.frames += d.frames; d.cls.forEach((v, k) => tot.cls[k] += v); tot.missed += d.missed; tot.reboots += d.reboots;
+    tot.first = tot.first ? Math.min(tot.first, d.first) : d.first; tot.last = Math.max(tot.last, d.last); tot.rssiSum += d.rssiSum; tot.rssiN += d.rssiN;
+  });
+  return { list, tot };
+}
+
+function lhTableHtml(st, classes) {
+  const pct = (v, f) => f > 0 ? ' <span class="note">' + Math.round(100 * v / f) + '%</span>' : '';
+  const row = (d, isTot) => {
+    const unsure = Math.max(0, d.frames - d.cls.reduce((a, b) => a + b, 0));
+    return '<tr' + (isTot ? ' class="tot"' : '') + '><td><b>' + esc(d.name) + '</b>' + (d.self ? ' <span class="note">(this device)</span>' : '') + '</td>' +
+      '<td>' + (d.first ? lhClock(d.first) : '-') + '</td><td>' + (d.last ? lhClock(d.last) : '-') + '</td><td>' + d.n + '</td>' +
+      '<td>' + d.missed + (d.reboots ? ' <span class="note">+' + d.reboots + ' restart' + (d.reboots > 1 ? 's' : '') + '</span>' : '') + '</td><td>' + d.frames + '</td>' +
+      d.cls.map(v => '<td>' + v + pct(v, d.frames) + '</td>').join('') +
+      '<td>' + unsure + pct(unsure, d.frames) + '</td><td>' + (d.rssiN ? Math.round(d.rssiSum / d.rssiN) + ' dBm' : '-') + '</td></tr>';
+  };
+  const head = '<tr><th>Device</th><th>First heard</th><th>Last heard</th><th>Reports</th><th>Missed</th><th>Frames</th>' +
+    classes.map((c, k) => '<th><span style="color:' + lhColor(k) + '">\u25cf</span> ' + esc(c) + '</th>').join('') + '<th>Unsure</th><th>Avg signal</th></tr>';
+  return '<table><thead>' + head + '</thead><tbody>' + st.list.map(d => row(d, false)).join('') + (st.list.length > 1 ? row(st.tot, true) : '') + '</tbody></table>' +
+    '<p class="note">Percentages are shares of all frames the device(s) looked at. Unsure = frames below the confidence limit. Missed = reports lost between two heard reports (from the report numbers).</p>';
+}
+
+// chart data: frames per class in time steps from the start of monitoring
+function lhModel(d, dev, mode, bucketSec) {
+  const rows = dev ? d.rows.filter(r => r.name === dev) : d.rows, K = d.classes.length;
+  if (!rows.length) return null;
+  let tMin = Infinity, tMax = 0; const pe = [];
+  rows.forEach(r => { tMin = Math.min(tMin, r.t); tMax = Math.max(tMax, r.t); pe.push(r.period * 1000); });
+  pe.sort((a, b) => a - b);
+  const base = Math.max(5000, pe[Math.floor(pe.length / 2)] || 30000), x0 = Math.min(d.t0, tMin), span = Math.max(1, tMax - x0);
+  let bucket = bucketSec > 0 ? bucketSec * 1000 : base;
+  if (!(bucketSec > 0) && span / bucket > 300) bucket = Math.ceil(span / 300 / base) * base;
+  const n = Math.floor(span / bucket) + 1, ys = [];
+  for (let k = 0; k < K; k++) ys.push(new Array(n).fill(0));
+  const seen = new Array(n).fill(0);
+  const det = []; for (let i = 0; i < n; i++) det.push({});
+  rows.forEach(r => {
+    const i = Math.min(n - 1, Math.floor((r.t - x0) / bucket)); seen[i]++;
+    r.counts.forEach((v, k) => { if (k < K) ys[k][i] += v; });
+    const o = det[i][r.name] || (det[i][r.name] = { cls: new Array(K).fill(0), seqMin: r.seq, seqMax: r.seq, rssiSum: 0, rssiN: 0, self: false });
+    o.seqMin = Math.min(o.seqMin, r.seq); o.seqMax = Math.max(o.seqMax, r.seq); if (r.self) o.self = true;
+    r.counts.forEach((v, k) => { if (k < K) o.cls[k] += v; });
+    if (!r.self && r.rssi != null && Number.isFinite(r.rssi)) { o.rssiSum += r.rssi; o.rssiN++; }
+  });
+  let out = ys.map(a => a.map((v, i) => seen[i] ? v : null));   // a step with no report is a gap, not a zero
+  if (mode === 'cum') out = ys.map(a => { let s = 0; return a.map(v => s += v); });
+  if (mode === 'pct') out = ys.map(a => a.map((v, i) => { let t = 0; for (let k = 0; k < K; k++) t += ys[k][i]; return t > 0 ? 100 * v / t : null; }));
+  return { x0, bucket, n, K, series: out, mode, empty: seen.map(c => c === 0), det, raw: ys };
+}
+
+const lhLab = ms => { const s = Math.round(ms / 1000); return s >= 3600 ? Math.floor(s / 3600) + ':' + p2(Math.floor(s / 60) % 60) + ' h' : Math.floor(s / 60) + ':' + p2(s % 60); };
+// text for one point of the graph: which devices it is made of
+function lhDetail(m, classes, k, i) {
+  const v = m.series[k][i], step = m.raw[k][i], names = Object.keys(m.det[i]).sort();
+  const when = lhLab(i * m.bucket) + ' after the start (' + lhClock(m.x0 + i * m.bucket) + ')';
+  const val = m.mode === 'pct' ? v.toFixed(0) + '% of the classified frames in this step' : m.mode === 'cum' ? 'running total ' + v + ' (this step adds ' + step + ')' : v + ' frames in this step';
+  const from = names.map(n => { const o = m.det[i][n]; return '  ' + n + (o.self ? ' (this device)' : '') + ', report ' + (o.seqMin === o.seqMax ? '#' + o.seqMin : '#' + o.seqMin + ' to #' + o.seqMax) + ': ' + o.cls[k] + ' frames' + (o.rssiN ? ', signal ' + Math.round(o.rssiSum / o.rssiN) + ' dBm' : ''); });
+  return classes[k] + ' at ' + when + '\n' + val + '\nFrom:\n' + from.join('\n');
+}
+function lhNice(max) { if (max <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(max))), f = max / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p; }
+function lhSvg(m, classes, bg) {
+  const W = 900, H = 330, L = 54, R = 14, T = 14, B = 44, iw = W - L - R, ih = H - T - B;
+  const vis = []; for (let k = 0; k < m.K; k++) if (!lhHidden.has(k)) vis.push(k);
+  let ymax = m.mode === 'pct' ? 100 : 0;
+  if (m.mode !== 'pct') vis.forEach(k => m.series[k].forEach(v => { if (v > ymax) ymax = v; }));
+  ymax = m.mode === 'pct' ? 100 : lhNice(ymax);
+  const span = (m.n - 1) * m.bucket, X = i => L + (m.n === 1 ? iw / 2 : i / (m.n - 1) * iw), Y = v => T + ih - (v / ymax) * ih;
+  const steps = [10, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600, 43200, 86400], tick = (steps.find(s => span / 1000 / s <= 8) || 86400) * 1000;
+  const lab = lhLab;
+  let g = '';
+  if (bg) g += '<rect width="' + W + '" height="' + H + '" fill="#182029"/>';
+  for (let i = 0; i <= 4; i++) { const v = ymax * i / 4, y = Y(v); g += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y + '" y2="' + y + '" stroke="#2c3947"/><text x="' + (L - 6) + '" y="' + (y + 4) + '" text-anchor="end" fill="#8b9aac" font-size="11">' + (m.mode === 'pct' ? Math.round(v) + '%' : (v < 10 && v % 1 ? v.toFixed(1) : Math.round(v))) + '</text>'; }
+  for (let ms = 0; ms <= span; ms += tick) { const x = m.n === 1 ? L + iw / 2 : L + ms / span * iw; g += '<line x1="' + x + '" x2="' + x + '" y1="' + T + '" y2="' + (T + ih) + '" stroke="#222d39"/><text x="' + x + '" y="' + (H - B + 16) + '" text-anchor="middle" fill="#8b9aac" font-size="11">' + lab(ms) + '</text>'; }
+  g += '<text x="' + (L + iw / 2) + '" y="' + (H - 6) + '" text-anchor="middle" fill="#8b9aac" font-size="12">time since ' + lhClock(m.x0) + ' (m:ss or h:mm)</text>';
+  g += '<text x="14" y="' + (T + ih / 2) + '" text-anchor="middle" fill="#8b9aac" font-size="12" transform="rotate(-90 14 ' + (T + ih / 2) + ')">' + (m.mode === 'pct' ? 'share of classified frames' : m.mode === 'cum' ? 'frames, running total' : 'frames per step') + '</text>';
+  vis.forEach(k => {
+    let path = '', pen = false, dots = '';
+    m.series[k].forEach((v, i) => {
+      if (v == null) { pen = false; return; }
+      path += (pen ? 'L' : 'M') + X(i).toFixed(1) + ' ' + Y(v).toFixed(1) + ' '; pen = true;
+      const cx = X(i).toFixed(1), cy = Y(v).toFixed(1);
+      if (m.n <= 150) dots += '<circle cx="' + cx + '" cy="' + cy + '" r="2.6" fill="' + lhColor(k) + '"/>';
+      dots += '<circle class="hit" data-i="' + i + '" data-k="' + k + '" cx="' + cx + '" cy="' + cy + '" r="7" fill="#000" fill-opacity="0" pointer-events="all"><title>' + esc(lhDetail(m, classes, k, i)) + '</title></circle>';
+    });
+    g += '<path d="' + path + '" fill="none" stroke="' + lhColor(k) + '" stroke-width="2" stroke-linejoin="round"/>' + dots;
+  });
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Frames per class over time, one line per class" font-family="Segoe UI, system-ui, sans-serif">' + g + '</svg>';
+}
+
+function lhCsvText(d) {
+  const lines = [['time', 'elapsed_s', 'device', 'source', 'seq', 'period_s', 'frames'].concat(d.classes, ['unsure', 'rssi_dbm', 'snr_db']).map(csvq).join(',')];
+  d.rows.forEach(r => {
+    const c = d.classes.map((_, k) => r.counts[k] != null ? r.counts[k] : 0), un = Math.max(0, r.frames - r.counts.reduce((a, b) => a + b, 0));
+    lines.push([new Date(r.t).toISOString(), ((r.t - d.t0) / 1000).toFixed(1), r.name, r.self ? 'self' : 'heard', r.seq, r.period, r.frames].concat(c, [un, r.rssi == null ? '' : r.rssi, r.snr == null ? '' : r.snr]).map(csvq).join(','));
+  });
+  return lines.join('\r\n') + '\r\n';
+}
+function lhMsgCsvText() {
+  const t0 = lora.t0 || (lora.hmsgs.length ? lora.hmsgs[0].t : Date.now());
+  const lines = [['time', 'elapsed_s', 'direction', 'rssi_dbm', 'snr_db', 'text'].join(',')];
+  lora.hmsgs.forEach(m => lines.push([new Date(m.t).toISOString(), ((m.t - t0) / 1000).toFixed(1), m.self ? 'sent' : 'heard', m.rssi == null ? '' : m.rssi, m.snr == null ? '' : m.snr, m.text].map(csvq).join(',')));
+  return lines.join('\r\n') + '\r\n';
+}
+
+function csvParse(text) {
+  const rows = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); f = ''; if (row.length > 1 || row[0] !== '') rows.push(row); row = []; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows;
+}
+function lhSay(msg, bad) { $('lhNote').textContent = msg; $('lhNote').style.color = bad ? 'var(--bad)' : ''; }
+// Reads a report CSV or a messages CSV. mode 'view' shows a report file on its own, 'continue' adds it to the live history.
+function lhImportText(text, name, mode) {
+  const T = csvParse(text.replace(/^\uFEFF/, ''));
+  if (T.length < 2) return { bad: true, msg: name + ': the file has no data rows.' };
+  const h = T[0].map(x => x.trim().toLowerCase()), ix = n => h.indexOf(n);
+  const tm = s => { s = (s || '').trim(); if (/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(s)) s = s.replace(' ', 'T'); return Date.parse(s); };
+  const num = (a, i) => { const v = i >= 0 ? a[i] : ''; return v === '' || v == null ? NaN : Number(v); };
+  if (ix('direction') >= 0 && ix('text') >= 0) {                     // messages file
+    if (ix('time') < 0) return { bad: true, msg: name + ': the messages file needs a time column.' };
+    const have = new Set(lora.hmsgs.map(m => m.t + '|' + m.self + '|' + m.text)); let added = 0, dup = 0;
+    for (let r = 1; r < T.length; r++) {
+      const a = T[r], t = tm(a[ix('time')]); if (!Number.isFinite(t)) continue;
+      const rs = num(a, ix('rssi_dbm')), sn = num(a, ix('snr_db'));
+      const m = { t, self: (a[ix('direction')] || '').trim() === 'sent', rssi: Number.isFinite(rs) ? rs : null, snr: Number.isFinite(sn) ? sn : null, text: a[ix('text')] || '' };
+      const key = m.t + '|' + m.self + '|' + m.text; if (have.has(key)) { dup++; continue; } have.add(key); lora.hmsgs.push(m); added++;
+    }
+    lora.hmsgs.sort((x, y) => x.t - y.t); lhDirty = true;
+    return { bad: false, msg: name + ': ' + added + ' messages loaded' + (dup ? ' (' + dup + ' were already there)' : '') + '.' };
+  }
+  if (ix('time') < 0 || ix('device') < 0 || ix('frames') < 0) return { bad: true, msg: name + ': not a LoRa CSV. A report file needs the columns time, device and frames.' };
+  const c0 = ix('frames') + 1; let c1 = c0; while (c1 < h.length && !['unsure', 'rssi_dbm', 'snr_db'].includes(h[c1])) c1++;
+  if (c1 <= c0) return { bad: true, msg: name + ': no class columns found after the frames column.' };
+  const classes = T[0].slice(c0, c1).map(x => x.trim()), rows = [];
+  for (let r = 1; r < T.length; r++) {
+    const a = T[r], t = tm(a[ix('time')]), frames = num(a, ix('frames'));
+    if (!Number.isFinite(t) || !Number.isFinite(frames) || !a[ix('device')]) continue;
+    const counts = []; for (let k = c0; k < c1; k++) { const v = Number(a[k]); counts.push(Number.isFinite(v) ? v : 0); }
+    const seq = num(a, ix('seq')), per = num(a, ix('period_s')), rs = num(a, ix('rssi_dbm')), sn = num(a, ix('snr_db'));
+    rows.push({ t, name: a[ix('device')].trim(), self: ix('source') >= 0 && (a[ix('source')] || '').trim() === 'self', seq: Number.isFinite(seq) ? seq : r, period: Number.isFinite(per) ? per : 30, frames, counts, rssi: Number.isFinite(rs) ? rs : null, snr: Number.isFinite(sn) ? sn : null });
+  }
+  if (!rows.length) return { bad: true, msg: name + ': no valid report rows found (check the time, device and frames columns).' };
+  rows.sort((x, y) => x.t - y.t);
+  if (mode === 'view') {
+    lora.view = { live: false, name, rows, classes, t0: rows[0].t }; lhHidden.clear(); lhDirty = true;
+    return { bad: false, msg: name + ': showing ' + rows.length + ' reports (view only). Your live data keeps collecting; Back to live data returns to it.' };
+  }
+  const have = new Set(lora.hist.map(r => r.t + '|' + r.name + '|' + r.seq)); let added = 0, dup = 0;
+  rows.forEach(r => { const key = r.t + '|' + r.name + '|' + r.seq; if (have.has(key)) dup++; else { have.add(key); lora.hist.push(r); added++; } });
+  lora.hist.sort((x, y) => x.t - y.t);
+  lora.t0 = lora.t0 ? Math.min(lora.t0, rows[0].t) : rows[0].t;
+  lora.loaded += added; lora.view = null; lhHidden.clear(); lhDirty = true;
+  if (!lora.histClasses) lora.histClasses = classes;
+  let note = name + ': ' + added + ' reports added to the history' + (dup ? ' (' + dup + ' were already there)' : '') + '. New reports are added after them, and Download CSV saves everything.';
+  if (lora.classes && lora.classes.join('|').toLowerCase() !== classes.join('|').toLowerCase()) note += ' The class names in the file (' + classes.join(', ') + ') differ from the connected device (' + lora.classes.join(', ') + '); columns are matched by position.';
+  return { bad: false, msg: note };
+}
+
+function lhMsgsHtml() {
+  if (!lora.hmsgs.length) return '<p class="note">No messages yet. Send one with the Send message box in section 9, or type &gt;your text in the serial monitor. Messages other boards send appear here too.</p>';
+  const rows = lora.hmsgs.slice(-200).reverse().map(m => '<tr><td>' + esc(stamp(m.t)) + '</td><td>' + (m.self ? 'sent by this device' : 'heard') + '</td><td>' + (m.rssi == null ? '-' : m.rssi + ' dBm, SNR ' + m.snr) + '</td><td>' + esc(m.text) + '</td></tr>').join('');
+  return '<table><thead><tr><th>Time</th><th>Direction</th><th>Signal</th><th>Message</th></tr></thead><tbody>' + rows + '</tbody></table>' + (lora.hmsgs.length > 200 ? '<p class="note">Showing the latest 200 of ' + lora.hmsgs.length + '. The CSV has all of them.</p>' : '');
+}
+
+function lhStatusText() {
+  const d = lhData(), devs = new Set(d.rows.map(r => r.name)).size;
+  let s;
+  if (!d.live) s = 'Viewing the imported file "' + d.name + '": ' + d.rows.length + ' reports from ' + devs + ' device' + (devs === 1 ? '' : 's') + ', ' + stamp(d.rows[0].t) + ' to ' + stamp(d.rows[d.rows.length - 1].t) + ' (' + lhDur(d.rows[d.rows.length - 1].t - d.rows[0].t) + ').';
+  else if (!lora.t0 && !d.rows.length) s = 'Nothing yet. The history starts when the serial monitor is connected (section 8).';
+  else s = 'Monitoring since ' + stamp(d.t0) + ', elapsed ' + lhDur(Date.now() - d.t0) + ' (' + (ser.port ? 'serial monitor connected' : 'serial monitor not connected') + '). ' + d.rows.length + ' reports from ' + devs + ' device' + (devs === 1 ? '' : 's') + (lora.hmsgs.length ? ', ' + lora.hmsgs.length + ' messages' : '') + '.' + (lora.loaded ? ' ' + lora.loaded + ' of the reports were loaded from a file.' : '');
+  $('lhStatus').textContent = s;
+  $('lhLive').hidden = d.live;
+}
+let lhLast = null;
+function lhRender() {
+  lhDirty = false;
+  const d = lhData(), K = d.classes.length;
+  const sel = $('lhDev'), cur = sel.value, names = [...new Set(d.rows.map(r => r.name))].sort();
+  sel.innerHTML = '<option value="">All devices</option>' + names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+  sel.value = names.includes(cur) ? cur : '';
+  $('lhMsgCsv').textContent = 'Download messages CSV (' + lora.hmsgs.length + ')';
+  $('lhMsgs').innerHTML = lhMsgsHtml();
+  lhStatusText();
+  if (!d.rows.length) { lhLast = null; $('lhStats').innerHTML = '<p class="note">No reports yet.</p>'; $('lhChart').innerHTML = '<p class="note" style="padding:12px">The graph appears with the first report.</p>'; $('lhLegend').innerHTML = ''; return; }
+  $('lhStats').innerHTML = lhTableHtml(lhStats(d.rows, K), d.classes);
+  const m = lhModel(d, sel.value, $('lhMode').value, parseInt($('lhBucket').value) || 0);
+  lhLast = m ? { m, classes: d.classes } : null;
+  $('lhLegend').innerHTML = d.classes.map((c, k) => '<button type="button" class="' + (lhHidden.has(k) ? 'off' : '') + '" data-k="' + k + '" aria-pressed="' + !lhHidden.has(k) + '"><i style="background:' + lhColor(k) + '"></i>' + esc(c) + '</button>').join('');
+  $('lhLegend').querySelectorAll('button').forEach(b => b.onclick = () => { const k = +b.dataset.k; lhHidden.has(k) ? lhHidden.delete(k) : lhHidden.add(k); lhRender(); });
+  $('lhChart').innerHTML = m ? lhSvg(m, d.classes, false) : '';
+}
+// hover or tap on a point: show which devices it is made of
+const lhShowPoint = e => { const c = e.target.closest && e.target.closest('circle.hit'); if (c && lhLast) $('lhPick').textContent = lhDetail(lhLast.m, lhLast.classes, +c.dataset.k, +c.dataset.i); };
+$('lhChart').addEventListener('mouseover', lhShowPoint);
+$('lhChart').addEventListener('click', lhShowPoint);
+$('lhCsv').onclick = () => { const d = lhData(); if (!d.rows.length) { lhSay('Nothing to save yet: no reports have been heard.'); return; } lhSave('lora-history-' + lhFileStamp() + '.csv', lhCsvText(d), 'text/csv'); lhSay('Saved ' + d.rows.length + ' reports.'); };
+$('lhMsgCsv').onclick = () => { if (!lora.hmsgs.length) { lhSay('There are no messages to save yet. A message is recorded when someone sends one with >your text or the Send message box in section 9.', true); return; } lhSave('lora-messages-' + lhFileStamp() + '.csv', lhMsgCsvText(), 'text/csv'); lhSay('Saved ' + lora.hmsgs.length + ' messages.'); };
+$('lhSvg').onclick = () => { const d = lhData(), m = d.rows.length && lhModel(d, $('lhDev').value, $('lhMode').value, parseInt($('lhBucket').value) || 0); if (!m) { lhSay('Nothing to draw yet.'); return; } lhSave('lora-graph-' + lhFileStamp() + '.svg', lhSvg(m, d.classes, true), 'image/svg+xml'); lhSay('Saved the graph.'); };
+let lhMode = 'view';
+$('lhImport').onclick = () => { lhMode = 'view'; $('lhFile').click(); };
+$('lhContinue').onclick = () => { lhMode = 'continue'; $('lhFile').click(); };
+$('lhFile').onchange = e => {
+  const files = [...e.target.files], mode = lhMode; e.target.value = ''; if (!files.length) return;
+  const out = []; let bad = false;
+  files.forEach(f => {
+    const fr = new FileReader(), done = r => { out.push(r.msg); bad = bad || r.bad; if (out.length === files.length) { lhSay(out.join('  '), bad); lhRender(); } };
+    fr.onload = () => done(lhImportText(String(fr.result), f.name, mode)); fr.onerror = () => done({ bad: true, msg: f.name + ': could not read the file.' }); fr.readAsText(f);
+  });
+};
+$('lhLive').onclick = () => { lora.view = null; lhHidden.clear(); lhSay(''); lhDirty = true; lhRender(); };
+$('lhClear').onclick = () => { if (!confirm('Delete the history collected so far (reports, messages and anything loaded from files)?')) return; lora.hist = []; lora.hmsgs = []; lora.loaded = 0; lora.histClasses = null; lora.t0 = ser.port ? Date.now() : 0; lora.view = null; lhSay(''); lhDirty = true; lhRender(); };
+['lhDev', 'lhMode', 'lhBucket'].forEach(id => $(id).onchange = () => lhRender());
+setInterval(() => { lhStatusText(); if (lhDirty) lhRender(); }, 1000); lhRender();
 
 // ---------- wiring ----------
 $('btnDir').onclick = pickDir;
