@@ -1,6 +1,6 @@
 // ======================================================
 // XIAO ESP32S3 SENSE (OR XIAO ML KIT): VISION CNN + LORA NETWORK
-// firmware-lora-v008  (works with index-lora-v006.html)
+// firmware-lora-v009  (works with index-lora-v009.html)
 // ======================================================
 // Small image collection, training and inference for education and proof of concept.
 //  - Images are collected per class on the SD card, a small CNN is trained on the board, then it classifies the camera.
@@ -24,6 +24,7 @@
 //   Serial Monitor: t = next, l = select, or press the item's digit. The A0 touch pad works when MY_TOUCH_ENABLED is 1.
 //
 // Commands (type, then Enter; @help lists them with their current values)
+//   Typing a setting command alone (for example  @name ) shows its current value.
 //   >text   @name @report @channel @conf @autostart @autodelay @print @touch @oled @encrypt @seed
 //   @menu @status @time @reset @help
 //   Every setting has its default in USER SETTINGS below. A value changed by command is saved in flash and wins over
@@ -210,6 +211,7 @@ void myLoraReport();
 void myLoraService();
 void myLoraHelp();
 void myLoraStatus();
+bool myLoraGetSetting(const char* line);
 void myLoraCommand(char* l);
 void myLoraDrawChat();
 void myActionLoraChat();
@@ -1129,6 +1131,7 @@ void myLoraHelp() {
     Serial.printf("  %-18s %-38s now: %s  [%s]\n", cmd, what, val, myPrefs.isKey(key) ? "saved" : "default");
   };
   Serial.println(F("\n=== COMMANDS (type, then Enter) ==="));
+  Serial.printf("THIS BOARD IS  %s   (type a setting command alone, e.g. @name, to see its value)\n", myLoraName);
   Serial.println(F("SEND A MESSAGE"));
   Serial.println(F("  >your text         send a LoRa message to every board that is listening (works in any mode)"));
   Serial.println(F("SETTINGS (each one is saved in flash; @reset restores the defaults)"));
@@ -1165,8 +1168,39 @@ void myLoraStatus() {
   Serial.printf("  OLED %s (mode %s)\n", u8g2.present ? "ok" : "not used, screen output is skipped", myOledMode == 0 ? "off" : myOledMode == 1 ? "on" : "auto");
 }
 
+// A setting command typed alone shows its current value, e.g.  @name  ->  @name = device-a01   [default]
+bool myLoraGetSetting(const char* line) {
+  if (strlen(line) > 22) return false;
+  char c[24]; strcpy(c, line);
+  int n = strlen(c);
+  while (n > 0 && (c[n - 1] == ' ' || c[n - 1] == '\r' || c[n - 1] == '\n')) c[--n] = 0;
+  char v[48]; const char* key; const char* use;
+  if      (!strcasecmp(c, "@name"))      { snprintf(v, sizeof(v), "%s", myLoraName); key = "name"; use = "@name <text>"; }
+  else if (!strcasecmp(c, "@report"))    { snprintf(v, sizeof(v), "%d s", myLoraReportSec); key = "rep"; use = "@report <sec>"; }
+  else if (!strcasecmp(c, "@channel"))   { snprintf(v, sizeof(v), "%d = %.1f MHz", myLoraChannel, myLoraFreq()); key = "ch"; use = "@channel <0-120>"; }
+  else if (!strcasecmp(c, "@conf"))      { snprintf(v, sizeof(v), "%d %%", myLoraMinConf); key = "conf"; use = "@conf <pct>"; }
+  else if (!strcasecmp(c, "@autostart")) { snprintf(v, sizeof(v), "%s", myAutoStart ? "on" : "off"); key = "auto"; use = "@autostart on|off"; }
+  else if (!strcasecmp(c, "@autodelay")) { snprintf(v, sizeof(v), "%d s", myAutoDelay); key = "adly"; use = "@autodelay <sec>"; }
+  else if (!strcasecmp(c, "@print"))     { snprintf(v, sizeof(v), "every %d. frame", myPrintEvery); key = "prt"; use = "@print <n>"; }
+#if MY_TOUCH_ENABLED
+  else if (!strcasecmp(c, "@touch"))     { snprintf(v, sizeof(v), "%s", myTouchExit ? "on" : "off"); key = "tch"; use = "@touch on|off"; }
+#else
+  else if (!strcasecmp(c, "@touch"))     { snprintf(v, sizeof(v), "n/a, touch pad off (D0 = LoRa DIO1)"); key = "tch"; use = "@touch on|off"; }
+#endif
+  else if (!strcasecmp(c, "@oled"))      { snprintf(v, sizeof(v), "%s", myOledMode == 0 ? "off" : myOledMode == 1 ? "on" : "auto"); key = "oled"; use = "@oled off|on|auto"; }
+  else if (!strcasecmp(c, "@encrypt"))   { snprintf(v, sizeof(v), "%s", myLoraEncrypt ? "on" : "off"); key = "enc"; use = "@encrypt on|off"; }
+  else if (!strcasecmp(c, "@seed"))      { snprintf(v, sizeof(v), "%s", myLoraSeed); key = "seed"; use = "@seed <text>"; }
+  else return false;
+  myPrefs.begin("lora", false);
+  bool saved = myPrefs.isKey(key);
+  myPrefs.end();
+  Serial.printf("  %s = %s   [%s]   change: %s\n", c, v, saved ? "saved" : "default", use);
+  return true;
+}
+
 void myLoraCommand(char* l) {
   char chbuf[16];
+  if (myLoraGetSetting(l)) return;   // a setting command typed alone only shows its value
   if (!strncasecmp(l, "@channel", 8)) { const char* a = l + 8; while (*a == ' ') a++; snprintf(chbuf, sizeof(chbuf), "@%s", a); l = chbuf; }   // @channel 3 = @3
   if (!strcasecmp(l, "@help") || !strcmp(l, "@?") || !strcasecmp(l, "@settings")) { myLoraHelp(); return; }
   if (!strcasecmp(l, "@menu")) { myWantMenu = true; return; }                       // the menu loop reprints itself
@@ -1244,9 +1278,10 @@ void myLoraCommand(char* l) {
   }
   if (l[0] == '>') { myLoraSendText(l + 1); return; }                        // >hello
   if (!strncasecmp(l, "@say ", 5)) { myLoraSendText(l + 5); return; }
+  if (!strcasecmp(l, "@say")) { Serial.println(F("[E] use  >your text  (or  @say your text)")); return; }
   if (!strncasecmp(l, "@time", 5)) {
     int h, m, sec = 0;
-    if (l[5] == 0) { char st[16]; myLoraStamp(st, sizeof(st)); Serial.printf("[%s] now\n", st); return; }
+    if (l[5] == 0) { char st[16]; myLoraStamp(st, sizeof(st)); Serial.printf("  @time = %s   change: @time hh:mm[:ss]\n", st); return; }
     int got = sscanf(l + 5, "%d:%d:%d", &h, &m, &sec);
     if (got < 2 || h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) { Serial.println(F("[E] use  @time hh:mm  or  @time hh:mm:ss  (24 hour clock)")); return; }
     long tod = h * 3600L + m * 60L + sec;
@@ -1257,8 +1292,11 @@ void myLoraCommand(char* l) {
   long ch = strtol(l + 1, &e, 10);
   if (*e == 0 && e != l + 1 && ch >= 0 && ch <= 120) {
     myLoraChannel = (int)ch; myLoraSave();
-    if (myLoraOk) { myRadio.standby(); int st = myRadio.setFrequency(myLoraFreq()); myRadio.startReceive();
-      Serial.printf(st == RADIOLIB_ERR_NONE ? "[OK] channel %d (%.1f MHz, saved)\n" : "[E] frequency change failed (%d)\n", st == RADIOLIB_ERR_NONE ? (int)ch : st, myLoraFreq()); }
+    if (myLoraOk) {
+      myRadio.standby(); int st = myRadio.setFrequency(myLoraFreq()); myRadio.startReceive();
+      if (st == RADIOLIB_ERR_NONE) Serial.printf("[OK] channel %d (%.1f MHz, saved)\n", (int)ch, myLoraFreq());
+      else Serial.printf("[E] frequency change failed (%d)\n", st);
+    } else Serial.printf("[OK] channel %d (%.1f MHz, saved; the radio is off)\n", (int)ch, myLoraFreq());
     myLoraPrintInfo(false); return;
   }
   Serial.println(F("[E] Unknown command. Type @help"));
@@ -1340,7 +1378,7 @@ void setup() {
   while (!Serial && millis() < 3000); 
   delay(1000);  // slow down the startup
   
-  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (firmware-lora-v008) ===");
+  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (firmware-lora-v009) ===");
   Serial.printf("Layout: INPUT_SIZE %d, CONV1_FILTERS %d, CONV2_FILTERS %d, NUM_CLASSES %d\n",
                 INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS, NUM_CLASSES);
   Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
@@ -2245,7 +2283,7 @@ void myActionInfer() {
     myResetMenuState();
     return;
   }
-  Serial.println("\n>>> Inference mode - OPTIMIZED");
+  Serial.printf("\n>>> Inference mode on board %s\n", myLoraName);
   Serial.println("Instructions:");
   Serial.println("  T or L exit to menu");
 
@@ -2382,7 +2420,7 @@ void myActionInfer() {
     frameTimes[frameIndex] = millis() - frameStart;
     float fps2 = 1000.0 / frameTimes[frameIndex];
     bool myShowLine = (myPrintEvery <= 1) || (myInferCount % myPrintEvery == 0);
-    if (myShowLine) Serial.printf("Frame %d: %lu ms (%.1f FPS) ", frameIndex+1, frameTimes[frameIndex], fps2);
+    if (myShowLine) Serial.printf("[%s] Frame %d: %lu ms (%.1f FPS) ", myLoraName, frameIndex+1, frameTimes[frameIndex], fps2);
     frameIndex++;
     if (myShowLine) {
       Serial.printf("Current Pred: %s (%.1f%%) | All:", 
@@ -2487,7 +2525,7 @@ void myResetMenuState() {
 
 void myDrawMenu() {
   // ===== SERIAL MENU =====
-  Serial.println("\n=== MENU ===");
+  Serial.printf("\n=== MENU  (board %s) ===\n", myLoraName);
   for (int i = 1; i <= myTotalItems; i++) {
     String label = myMenuLabel(i);
 
