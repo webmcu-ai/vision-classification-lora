@@ -1,13 +1,13 @@
 // ======================================================
 // XIAO ESP32S3 SENSE (OR XIAO ML KIT): VISION CNN + LORA NETWORK
-// firmware-lora-v007  (works with index-lora-v006.html)
+// firmware-lora-v008  (works with index-lora-v006.html)
 // ======================================================
 // Small image collection, training and inference for education and proof of concept.
 //  - Images are collected per class on the SD card, a small CNN is trained on the board, then it classifies the camera.
 //  - The SD card stores the images in class folders and the weights as header/myWeights.bin and as a .h text char array.
 //  - Class labels are read from /header/config.json at boot when the number of labels equals NUM_CLASSES.
-//  - Serial Monitor and OLED output. The OLED is optional: it is looked for at boot (MY_OLED_ADDRESS) and, if nothing
-//    answers on D4/D5, all screen output is skipped so a board without a display runs at full speed.
+//  - Serial Monitor and OLED output. The OLED is optional (I2C on D4/D5): @oled off never starts I2C and leaves
+//    D4..D7 alone, @oled auto looks for it at boot (MY_OLED_ADDRESS) and skips the screen if nothing answers.
 //
 // LoRa network
 //  - While inferring, every MY_DEFAULT_REPORT_SEC seconds (default 30) the board sends a short LoRa summary:
@@ -24,7 +24,7 @@
 //   Serial Monitor: t = next, l = select, or press the item's digit. The A0 touch pad works when MY_TOUCH_ENABLED is 1.
 //
 // Commands (type, then Enter; @help lists them with their current values)
-//   >text   @name @report @channel @conf @autostart @autodelay @print @touch @encrypt @seed
+//   >text   @name @report @channel @conf @autostart @autodelay @print @touch @oled @encrypt @seed
 //   @menu @status @time @reset @help
 //   Every setting has its default in USER SETTINGS below. A value changed by command is saved in flash and wins over
 //   the default until @reset.
@@ -75,7 +75,8 @@
 #define MY_DEFAULT_ENCRYPT     0              // 1 = LoRa text scrambled with the seed below (hides text from casual listeners only)
 #define MY_DEFAULT_SEED        "maker100"     // encryption seed, must match on all boards
 #define MY_TOUCH_ENABLED       0              // 1 = use the A0 (D0) touch pad. Must stay 0 while LORA_DIO1 is wired to D0
-#define MY_OLED_ADDRESS        0x3C           // 7-bit I2C address of the OLED, probed at boot. Nothing answering = no display, screen output is skipped
+#define MY_DEFAULT_OLED_MODE   2              // OLED on I2C (D4 SDA, D5 SCL): 0 = off (I2C never started, D4..D7 left alone), 1 = on, 2 = auto (look for it at boot)
+#define MY_OLED_ADDRESS        0x3C           // 7-bit I2C address looked for in auto mode
 #define MY_DEFAULT_TOUCH_EXIT  1              // with the touch pad on: 0 = ignore it while inferring (headless units)
 #define MY_DEFAULT_PRINT_EVERY 1              // print the per-frame "Current Pred" line every N frames (1 = every frame, 10 = quieter monitor)
 // ============================================================================
@@ -116,7 +117,9 @@ MyOled u8g2;
 bool myOledProbe() {
   Wire.begin();                                   // default SDA/SCL pins (D4/D5)
   Wire.beginTransmission(MY_OLED_ADDRESS);
-  return Wire.endTransmission() == 0;             // 0 = the display answered
+  bool found = (Wire.endTransmission() == 0);     // 0 = the display answered
+  if (!found) Wire.end();                         // give D4/D5 back so nothing keeps driving them
+  return found;
 }
 
 // ======================================================
@@ -182,6 +185,7 @@ bool myAutoStart = MY_DEFAULT_AUTO_START;
 int myAutoDelay = MY_DEFAULT_AUTO_DELAY_S;
 int myPrintEvery = MY_DEFAULT_PRINT_EVERY;
 bool myTouchExit = MY_DEFAULT_TOUCH_EXIT;
+int myOledMode = MY_DEFAULT_OLED_MODE;
 bool myWantMenu = false;     // set by @menu: leaves the LoRa msg screen
 unsigned long myLoraSeq = 0, myLoraTxN = 0, myLoraRxN = 0, myLoraErrN = 0;
 uint16_t myLoraCounts[NUM_CLASSES];
@@ -918,6 +922,7 @@ void myLoraSave() {
   myPrefs.putInt("adly", myAutoDelay);
   myPrefs.putInt("prt", myPrintEvery);
   myPrefs.putBool("tch", myTouchExit);
+  myPrefs.putInt("oled", myOledMode);
   myPrefs.end();
 }
 
@@ -933,6 +938,7 @@ void myLoraLoad() {
   myAutoDelay     = myPrefs.getInt("adly", MY_DEFAULT_AUTO_DELAY_S);
   myPrintEvery    = myPrefs.getInt("prt", MY_DEFAULT_PRINT_EVERY);
   myTouchExit     = myPrefs.getBool("tch", MY_DEFAULT_TOUCH_EXIT);
+  myOledMode      = myPrefs.getInt("oled", MY_DEFAULT_OLED_MODE);
   myPrefs.end();
 }
 
@@ -1138,6 +1144,7 @@ void myLoraHelp() {
 #else
   row("@touch on|off", "touch pad A0 can leave inference", "n/a, touch pad off (D0 = LoRa DIO1)", "tch");
 #endif
+  row("@oled off|on|auto", "OLED on D4/D5 (applies after a restart)", myOledMode == 0 ? "off" : myOledMode == 1 ? "on" : "auto", "oled");
   row("@encrypt on|off", "scramble LoRa text with the seed", myLoraEncrypt ? "on" : "off", "enc");
   row("@seed <text>", "encryption seed, same on all boards", myLoraSeed, "seed");
   Serial.println(F("OTHER"));
@@ -1155,7 +1162,7 @@ void myLoraStatus() {
   Serial.printf("  board %s   radio %s   channel %d (%.1f MHz)   encryption %s\n", myLoraName, myLoraOk ? "ok" : "OFF (check wiring)", myLoraChannel, myLoraFreq(), myLoraEncrypt ? "on" : "off");
   Serial.printf("  LoRa packets: sent %lu, heard %lu, errors %lu     summaries sent: %lu (one every %d s)\n", myLoraTxN, myLoraRxN, myLoraErrN, myLoraSeq, myLoraReportSec);
   Serial.printf("  time now %s%s\n", st, myLoraClockBase >= 0 ? "" : "   (time since boot; @time hh:mm sets the clock)");
-  Serial.printf("  OLED %s\n", u8g2.present ? "ok" : "not found, screen output is skipped");
+  Serial.printf("  OLED %s (mode %s)\n", u8g2.present ? "ok" : "not used, screen output is skipped", myOledMode == 0 ? "off" : myOledMode == 1 ? "on" : "auto");
 }
 
 void myLoraCommand(char* l) {
@@ -1177,6 +1184,17 @@ void myLoraCommand(char* l) {
     int v = atoi(a);
     if (!*a || v < 1 || v > 1000) { Serial.println(F("[E] use  @print <n>  (1 = every frame, 10 = every 10th frame)")); return; }
     myPrintEvery = v; myLoraSave(); Serial.printf("[OK] while inferring, print every %d. frame (saved)\n", v); myLoraPrintInfo(false); return;
+  }
+  if (!strncasecmp(l, "@oled", 5)) {
+    const char* a = l + 5; while (*a == ' ') a++;
+    int v;
+    if (!strcasecmp(a, "off") || !strcmp(a, "0")) v = 0;
+    else if (!strcasecmp(a, "on") || !strcmp(a, "1")) v = 1;
+    else if (!strcasecmp(a, "auto") || !strcmp(a, "2")) v = 2;
+    else { Serial.println(F("[E] use  @oled off  (never start I2C),  @oled on  or  @oled auto  (look for it at boot)")); return; }
+    myOledMode = v; myLoraSave();
+    Serial.printf("[OK] OLED mode %s (saved). Press reset to apply it.\n", v == 0 ? "off" : v == 1 ? "on" : "auto");
+    return;
   }
   if (!strncasecmp(l, "@touch", 6)) {
     const char* a = l + 6; while (*a == ' ') a++;
@@ -1322,7 +1340,7 @@ void setup() {
   while (!Serial && millis() < 3000); 
   delay(1000);  // slow down the startup
   
-  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (firmware-lora-v007) ===");
+  Serial.println("\n=== XIAO ESP32-S3 ML System Starting (firmware-lora-v008) ===");
   Serial.printf("Layout: INPUT_SIZE %d, CONV1_FILTERS %d, CONV2_FILTERS %d, NUM_CLASSES %d\n",
                 INPUT_SIZE, CONV1_FILTERS, CONV2_FILTERS, NUM_CLASSES);
   Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
@@ -1337,12 +1355,15 @@ if (!myRgbBuffer) {
 #if MY_TOUCH_ENABLED
   pinMode(A0, INPUT);
 #endif
-  if (myOledProbe()) {
+  myLoraLoad();   // the saved @oled mode is needed before the display is started
+  u8g2.present = (myOledMode == 1) || (myOledMode == 2 && myOledProbe());
+  if (u8g2.present) {
     u8g2.begin();
     Serial.println("OLED found");
+  } else if (myOledMode == 0) {
+    Serial.println("OLED off (@oled off): I2C is not started and D4..D7 are left alone");
   } else {
-    u8g2.present = false;
-    Serial.println("OLED not found on D4/D5, screen output is skipped. The Serial Monitor and the web page still work.");
+    Serial.println("OLED not found on D4/D5, screen output is skipped (@oled off stops the I2C check)");
   }
   
 // Manual SPI init with timeout to prevent hang when no SD card present
